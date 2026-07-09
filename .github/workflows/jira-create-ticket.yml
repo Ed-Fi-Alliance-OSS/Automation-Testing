@@ -188,7 +188,7 @@ jobs:
         with:
           script: |
             const projectNumber = parseInt(process.env.PROJECT_NUMBER);
-            const projectOwner  = process.env.PROJECT_OWNER;
+            const projectOwner  = process.env.PROJECT_OWNER || context.repo.owner;
             const jiraKey       = '${{ steps.create_ticket.outputs.jira_key }}';
             const issueNodeId   = context.payload.issue.node_id;
 
