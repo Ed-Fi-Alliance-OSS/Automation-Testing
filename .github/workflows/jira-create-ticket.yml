@@ -179,91 +179,64 @@ jobs:
             )"
           echo "✅ Remote link added to Jira ticket"
 
-      - name: Write Jira key to GitHub Project "Jira Key" field
+      - name: Write Jira URL to issue "Jira Key" field
         if: steps.trigger_check.outputs.matched == 'true'
         uses: actions/github-script@v7
         env:
-          PROJECT_NUMBER: ${{ vars.PROJECT_NUMBER }}
-          PROJECT_OWNER:  ${{ vars.PROJECT_OWNER }}
-          JIRA_BASE_URL:  ${{ vars.JIRA_BASE_URL }}
+          JIRA_BASE_URL: ${{ vars.JIRA_BASE_URL }}
         with:
           script: |
-            const projectNumber = parseInt(process.env.PROJECT_NUMBER);
-            const projectOwner  = process.env.PROJECT_OWNER || context.repo.owner;
-            const jiraKey       = '${{ steps.create_ticket.outputs.jira_key }}';
-            const jiraUrl       = `${process.env.JIRA_BASE_URL}/browse/${jiraKey}`;
-            const issueNodeId   = context.payload.issue.node_id;
+            const owner    = context.repo.owner;
+            const repo     = context.repo.repo;
+            const jiraKey  = '${{ steps.create_ticket.outputs.jira_key }}';
+            const jiraUrl  = `${process.env.JIRA_BASE_URL}/browse/${jiraKey}`;
+            const issueNodeId = context.payload.issue.node_id;
 
-            // 1. Find the project — try organization first, fall back to user account
-            let projectV2;
-            try {
-              const orgResult = await github.graphql(`
-                query($owner: String!, $number: Int!) {
-                  organization(login: $owner) {
-                    projectV2(number: $number) {
+            // 1. Query available issue fields for this org/repo
+            const fieldQuery = await github.graphql(`
+              query($issueId: ID!) {
+                node(id: $issueId) {
+                  ... on Issue {
+                    id
+                    issueType {
                       id
-                      fields(first: 50) {
-                        nodes {
-                          ... on ProjectV2Field { id name }
-                        }
+                      name
+                      fields(first: 30) {
+                        nodes { id name dataType }
                       }
                     }
                   }
                 }
-              `, { owner: projectOwner, number: projectNumber });
-              projectV2 = orgResult.organization.projectV2;
-            } catch {
-              const userResult = await github.graphql(`
-                query($owner: String!, $number: Int!) {
-                  user(login: $owner) {
-                    projectV2(number: $number) {
-                      id
-                      fields(first: 50) {
-                        nodes {
-                          ... on ProjectV2Field { id name }
-                        }
-                      }
-                    }
-                  }
-                }
-              `, { owner: projectOwner, number: projectNumber });
-              projectV2 = userResult.user.projectV2;
-            }
+              }
+            `, { issueId: issueNodeId });
 
-            const availableFields = projectV2.fields.nodes.filter(f => f.name).map(f => f.name);
-            console.log(`Available project fields: ${availableFields.join(', ')}`);
-
-            const jiraField = projectV2.fields.nodes.find(f => f.name === 'Jira Key');
-
-            if (!jiraField) {
-              core.setFailed(`Could not find a "Jira Key" field in the project. Available fields: ${availableFields.join(', ')}`);
+            const issueType = fieldQuery.node.issueType;
+            if (!issueType) {
+              core.setFailed('This issue has no issue type set — cannot write to issue fields.');
               return;
             }
 
-            // 2. Add the issue to the project (idempotent — returns existing item if already there)
-            const addResult = await github.graphql(`
-              mutation($projectId: ID!, $contentId: ID!) {
-                addProjectV2ItemById(input: { projectId: $projectId, contentId: $contentId }) {
-                  item { id }
-                }
-              }
-            `, { projectId: projectV2.id, contentId: issueNodeId });
+            const fields = issueType.fields.nodes;
+            console.log(`Issue type "${issueType.name}" fields: ${fields.map(f => f.name).join(', ')}`);
 
-            const itemId = addResult.addProjectV2ItemById.item.id;
+            const jiraField = fields.find(f => f.name === 'Jira Key');
+            if (!jiraField) {
+              core.setFailed(`Could not find "Jira Key" field. Available: ${fields.map(f => f.name).join(', ')}`);
+              return;
+            }
 
-            // 3. Set the "Jira Key" field value
+            // 2. Set the field value on the issue
             await github.graphql(`
-              mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $value: String!) {
-                updateProjectV2ItemFieldValue(input: {
-                  projectId:  $projectId,
-                  itemId:     $itemId,
-                  fieldId:    $fieldId,
-                  value:      { text: $value }
+              mutation($issueId: ID!, $fieldId: ID!, $value: String!) {
+                updateIssueFieldValue(input: {
+                  issueId: $issueId,
+                  fieldId: $fieldId,
+                  value:   { text: $value }
                 }) {
-                  projectV2Item { id }
+                  issue { id }
                 }
               }
-            `, { projectId: projectV2.id, itemId, fieldId: jiraField.id, value: jiraUrl });
+            `, { issueId: issueNodeId, fieldId: jiraField.id, value: jiraUrl });
 
             console.log(`✅ Set "Jira Key" field to ${jiraUrl}`);
 
