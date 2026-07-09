@@ -7,7 +7,7 @@ on:
 jobs:
   create-jira-ticket:
     # Run on every label event — the first step determines if this label is a configured trigger
-    if: vars.JIRA_PROJECT_CONFIG != ''
+    if: vars.GH_JIRA_AUTOMATION_CONFIG != ''
     runs-on: ubuntu-latest
 
     steps:
@@ -15,7 +15,7 @@ jobs:
         id: trigger_check
         env:
           ADDED_LABEL:    ${{ github.event.label.name }}
-          PROJECT_CONFIG: ${{ vars.JIRA_PROJECT_CONFIG }}
+          PROJECT_CONFIG: ${{ vars.GH_JIRA_AUTOMATION_CONFIG }}
         run: |
           PROJECT_LABEL=$(echo "$PROJECT_CONFIG" | jq -r \
             --arg trigger "$ADDED_LABEL" '
@@ -33,8 +33,8 @@ jobs:
     #     if: steps.trigger_check.outputs.matched == 'true'
     #     uses: actions/github-script@v7
     #     env:
-    #       ORG_READ_TOKEN: ${{ secrets.ORG_READ_TOKEN }}
-    #       ALLOWED_TEAMS:  ${{ vars.JIRA_ALLOWED_TEAMS }}
+    #       ORG_READ_TOKEN: ${{ secrets.GH_ORG_READ_PAT }}
+    #       ALLOWED_TEAMS:  ${{ vars.GH_JIRA_AUTOMATION_ALLOWED_TEAMS }}
     #     with:
     #       script: |
     #         const actor      = context.actor;
@@ -66,9 +66,9 @@ jobs:
         id: jira_meta
         env:
           LABELS:          ${{ toJson(github.event.issue.labels) }}
-          PROJECT_CONFIG:  ${{ vars.JIRA_PROJECT_CONFIG }}
+          PROJECT_CONFIG:  ${{ vars.GH_JIRA_AUTOMATION_CONFIG }}
           PROJECT_LABEL:   ${{ steps.trigger_check.outputs.project_label }}
-          TYPE_MAP:        ${{ vars.JIRA_TYPE_MAP }}
+          TYPE_MAP:        ${{ vars.JIRA_GH_TYPE_MAP }}
         run: |
           # Project is already determined by the trigger label
           PROJECT=$(echo "$PROJECT_CONFIG" | jq -r --arg label "$PROJECT_LABEL" '.[$label].key')
@@ -102,8 +102,8 @@ jobs:
           JIRA_ISSUE_TYPE:  ${{ steps.jira_meta.outputs.issue_type }}
           JIRA_ASSIGNEE_ID: ${{ steps.jira_meta.outputs.assignee }}
           JIRA_SPRINT_ID:   ${{ steps.jira_meta.outputs.sprint }}
-          JIRA_USER_EMAIL:  ${{ secrets.JIRA_USER_EMAIL }}
-          JIRA_API_TOKEN:   ${{ secrets.JIRA_API_TOKEN }}
+          JIRA_USER_EMAIL:  ${{ secrets.CREATE_JIRA_TICKET_USER_EMAIL }}
+          JIRA_API_TOKEN:   ${{ secrets.CREATE_JIRA_TICKET_PAT }}
           ISSUE_TITLE:      ${{ github.event.issue.title }}
           ISSUE_URL:        ${{ github.event.issue.html_url }}
           ISSUE_BODY:       ${{ github.event.issue.body }}
@@ -150,8 +150,8 @@ jobs:
         if: steps.trigger_check.outputs.matched == 'true'
         env:
           JIRA_BASE_URL:   ${{ vars.JIRA_BASE_URL }}
-          JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
-          JIRA_API_TOKEN:  ${{ secrets.JIRA_API_TOKEN }}
+          JIRA_USER_EMAIL: ${{ secrets.CREATE_JIRA_TICKET_USER_EMAIL }}
+          JIRA_API_TOKEN:  ${{ secrets.CREATE_JIRA_TICKET_PAT }}
           JIRA_KEY:        ${{ steps.create_ticket.outputs.jira_key }}
           ISSUE_URL:       ${{ github.event.issue.html_url }}
           ISSUE_TITLE:     ${{ github.event.issue.title }}
