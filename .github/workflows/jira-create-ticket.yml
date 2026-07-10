@@ -87,11 +87,20 @@ jobs:
             .[$label].sprint // empty
           ')
 
+          # Labels to transfer: issue labels that appear in the project's "labels"
+          # allowlist, sanitized for Jira (spaces -> hyphens). Emitted as compact JSON.
+          ALLOW=$(echo "$PROJECT_CONFIG" | jq -c --arg label "$PROJECT_LABEL" '.[$label].labels // []')
+          TRANSFER_LABELS=$(echo "$LABELS" | jq -c --argjson allow "$ALLOW" '
+            [ .[].name | select(. as $n | $allow | index($n)) ]
+            | map(gsub(" "; "-"))
+          ')
+
           echo "project=$PROJECT"          >> "$GITHUB_OUTPUT"
           echo "issue_type=${TYPE:-Story}" >> "$GITHUB_OUTPUT"
           echo "assignee=$ASSIGNEE"        >> "$GITHUB_OUTPUT"
           echo "sprint=$SPRINT"            >> "$GITHUB_OUTPUT"
-          echo "✅ Resolved → project: $PROJECT, type: ${TYPE:-Story}, assignee: ${ASSIGNEE:-(none)}, sprint: ${SPRINT:-(none)}"
+          echo "transfer_labels=$TRANSFER_LABELS" >> "$GITHUB_OUTPUT"
+          echo "✅ Resolved → project: $PROJECT, type: ${TYPE:-Story}, assignee: ${ASSIGNEE:-(none)}, sprint: ${SPRINT:-(none)}, labels: ${TRANSFER_LABELS}"
 
       - name: Check for existing Jira ticket for this project
         if: steps.trigger_check.outputs.matched == 'true'
@@ -175,6 +184,7 @@ jobs:
           JIRA_ISSUE_TYPE:  ${{ steps.jira_meta.outputs.issue_type }}
           JIRA_ASSIGNEE_ID: ${{ steps.jira_meta.outputs.assignee }}
           JIRA_SPRINT_ID:   ${{ steps.jira_meta.outputs.sprint }}
+          JIRA_LABELS:      ${{ steps.jira_meta.outputs.transfer_labels }}
           JIRA_USER_EMAIL:  ${{ secrets.CREATE_JIRA_TICKET_USER_EMAIL }}
           JIRA_API_TOKEN:   ${{ secrets.CREATE_JIRA_TICKET_PAT }}
           ISSUE_TITLE:      ${{ github.event.issue.title }}
@@ -187,6 +197,7 @@ jobs:
             --arg description "${ISSUE_BODY}" \
             --arg assignee    "${JIRA_ASSIGNEE_ID}" \
             --arg sprint      "${JIRA_SPRINT_ID}" \
+            --argjson labels  "${JIRA_LABELS:-[]}" \
             '{
               fields: {
                 project:     { key: $project },
@@ -202,6 +213,7 @@ jobs:
             }
             | if $assignee != "" then .fields.assignee = { accountId: $assignee } else . end
             | if $sprint   != "" then .fields.customfield_10020 = ($sprint | tonumber) else . end
+            | if ($labels | length) > 0 then .fields.labels = $labels else . end
             ')
 
           RESPONSE=$(curl --silent --show-error --fail \
