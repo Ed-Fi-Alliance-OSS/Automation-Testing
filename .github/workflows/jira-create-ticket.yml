@@ -87,12 +87,17 @@ jobs:
             .[$label].sprint // empty
           ')
 
-          # Labels to transfer: issue labels that appear in the project's "labels"
-          # allowlist, sanitized for Jira (spaces -> hyphens). Emitted as compact JSON.
-          ALLOW=$(echo "$PROJECT_CONFIG" | jq -c --arg label "$PROJECT_LABEL" '.[$label].labels // []')
-          TRANSFER_LABELS=$(echo "$LABELS" | jq -c --argjson allow "$ALLOW" '
-            [ .[].name | select(. as $n | $allow | index($n)) ]
+          # Final Jira label set = (issue labels that appear in "passthroughLabels")
+          # + every entry of "alwaysAddLabels". Sanitized for Jira (spaces -> hyphens)
+          # and de-duplicated. Emitted as compact JSON.
+          PASSTHROUGH_ALLOW=$(echo "$PROJECT_CONFIG" | jq -c --arg label "$PROJECT_LABEL" '.[$label].passthroughLabels // []')
+          ALWAYS_ADD=$(echo "$PROJECT_CONFIG" | jq -c --arg label "$PROJECT_LABEL" '.[$label].alwaysAddLabels // []')
+          TRANSFER_LABELS=$(echo "$LABELS" | jq -c \
+            --argjson allow  "$PASSTHROUGH_ALLOW" \
+            --argjson always "$ALWAYS_ADD" '
+            ( [ .[].name | select(. as $n | $allow | index($n)) ] + $always )
             | map(gsub(" "; "-"))
+            | unique
           ')
 
           echo "project=$PROJECT"          >> "$GITHUB_OUTPUT"
