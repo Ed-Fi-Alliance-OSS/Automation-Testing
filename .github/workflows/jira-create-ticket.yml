@@ -93,8 +93,81 @@ jobs:
           echo "sprint=$SPRINT"            >> "$GITHUB_OUTPUT"
           echo "✅ Resolved → project: $PROJECT, type: ${TYPE:-Story}, assignee: ${ASSIGNEE:-(none)}, sprint: ${SPRINT:-(none)}"
 
-      - name: Create Jira Ticket
+      - name: Check for existing Jira ticket for this project
         if: steps.trigger_check.outputs.matched == 'true'
+        id: check_existing
+        uses: actions/github-script@v7
+        env:
+          JIRA_PROJECT_KEY: ${{ steps.jira_meta.outputs.project }}
+        with:
+          script: |
+            const owner         = context.repo.owner;
+            const repo          = context.repo.repo;
+            const issueNodeId   = context.payload.issue.node_id;
+            const targetProject = process.env.JIRA_PROJECT_KEY;
+
+            // One query: the repo's "Jira Key" field definition + this issue's current value.
+            const result = await github.graphql(`
+              query($owner: String!, $repo: String!, $issueId: ID!) {
+                repository(owner: $owner, name: $repo) {
+                  issueFields(first: 50) {
+                    nodes {
+                      __typename
+                      ... on IssueFieldText { id name }
+                    }
+                  }
+                }
+                node(id: $issueId) {
+                  ... on Issue {
+                    issueFieldValues(first: 50) {
+                      nodes {
+                        __typename
+                        ... on IssueFieldTextValue {
+                          value
+                          field { ... on IssueFieldText { id name } }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            `, { owner, repo, issueId: issueNodeId });
+
+            const fields = result.repository.issueFields.nodes;
+            const jiraField = fields.find(f => f.name === 'Jira Key');
+            if (!jiraField) {
+              core.setFailed(`Could not find "Jira Key" issue field. Available: ${fields.map(f => f.name).join(', ')}`);
+              return;
+            }
+            core.setOutput('field_id', jiraField.id);
+
+            const valueNode = result.node.issueFieldValues.nodes
+              .find(v => v.field && v.field.id === jiraField.id);
+            const existingValue = valueNode ? valueNode.value : '';
+            core.setOutput('existing_value', existingValue);
+
+            // Extract the project prefix from each stored ".../browse/KEY-123" URL.
+            const existingProjects = existingValue
+              .split(',')
+              .map(s => s.trim())
+              .filter(Boolean)
+              .map(url => {
+                const m = url.match(/\/browse\/([A-Za-z][A-Za-z0-9]+)-\d+/);
+                return m ? m[1] : null;
+              })
+              .filter(Boolean);
+
+            const alreadyExists = existingProjects.includes(targetProject);
+            core.setOutput('already_exists', String(alreadyExists));
+
+            if (alreadyExists) {
+              console.log(`Project ${targetProject} already has a ticket for this issue (field: "${existingValue}") — skipping.`);
+            } else {
+              console.log(`No ${targetProject} ticket yet (existing projects: ${existingProjects.join(', ') || 'none'}) — will create.`);
+            }
+
+      - name: Create Jira Ticket
+        if: steps.trigger_check.outputs.matched == 'true' && steps.check_existing.outputs.already_exists == 'false'
         id: create_ticket
         env:
           JIRA_BASE_URL:    ${{ vars.JIRA_BASE_URL }}
@@ -144,7 +217,7 @@ jobs:
           echo "✅ Created Jira ticket: $JIRA_KEY"
 
       - name: Add GitHub issue link to Jira ticket
-        if: steps.trigger_check.outputs.matched == 'true'
+        if: steps.trigger_check.outputs.matched == 'true' && steps.check_existing.outputs.already_exists == 'false'
         env:
           JIRA_BASE_URL:   ${{ vars.JIRA_BASE_URL }}
           JIRA_USER_EMAIL: ${{ secrets.CREATE_JIRA_TICKET_USER_EMAIL }}
@@ -176,48 +249,24 @@ jobs:
             )"
           echo "✅ Remote link added to Jira ticket"
 
-      - name: Write Jira URL to issue "Jira Key" field
-        if: steps.trigger_check.outputs.matched == 'true'
+      - name: Append Jira URL to issue "Jira Key" field
+        if: steps.trigger_check.outputs.matched == 'true' && steps.check_existing.outputs.already_exists == 'false'
         uses: actions/github-script@v7
         env:
-          JIRA_BASE_URL: ${{ vars.JIRA_BASE_URL }}
+          JIRA_BASE_URL:  ${{ vars.JIRA_BASE_URL }}
+          FIELD_ID:       ${{ steps.check_existing.outputs.field_id }}
+          EXISTING_VALUE: ${{ steps.check_existing.outputs.existing_value }}
         with:
           script: |
-            const owner    = context.repo.owner;
-            const repo     = context.repo.repo;
-            const jiraKey  = '${{ steps.create_ticket.outputs.jira_key }}';
-            const jiraUrl  = `${process.env.JIRA_BASE_URL}/browse/${jiraKey}`;
+            const jiraKey     = '${{ steps.create_ticket.outputs.jira_key }}';
+            const jiraUrl     = `${process.env.JIRA_BASE_URL}/browse/${jiraKey}`;
             const issueNodeId = context.payload.issue.node_id;
+            const fieldId     = process.env.FIELD_ID;
+            const existing    = process.env.EXISTING_VALUE || '';
 
-            // 1. Query the repository's Issue Fields (org/repo-level, GA July 2026).
-            //    issueFields.nodes is a union — inline-fragment each member for id/name.
-            const fieldQuery = await github.graphql(`
-              query($owner: String!, $repo: String!) {
-                repository(owner: $owner, name: $repo) {
-                  issueFields(first: 50) {
-                    nodes {
-                      __typename
-                      ... on IssueFieldText        { id name }
-                      ... on IssueFieldNumber      { id name }
-                      ... on IssueFieldDate        { id name }
-                      ... on IssueFieldSingleSelect { id name }
-                      ... on IssueFieldMultiSelect  { id name }
-                    }
-                  }
-                }
-              }
-            `, { owner, repo });
+            // Append the new ticket URL, comma-separated, preserving any existing entries.
+            const newValue = existing ? `${existing},${jiraUrl}` : jiraUrl;
 
-            const fields = fieldQuery.repository.issueFields.nodes;
-            console.log(`Available issue fields: ${fields.map(f => f.name).join(', ')}`);
-
-            const jiraField = fields.find(f => f.name === 'Jira Key');
-            if (!jiraField) {
-              core.setFailed(`Could not find "Jira Key" issue field. Available: ${fields.map(f => f.name).join(', ')}`);
-              return;
-            }
-
-            // 2. Set the text value on the issue via updateIssueFieldValue.
             await github.graphql(`
               mutation($issueId: ID!, $fieldId: ID!, $value: String!) {
                 updateIssueFieldValue(input: {
@@ -227,7 +276,7 @@ jobs:
                   issue { id }
                 }
               }
-            `, { issueId: issueNodeId, fieldId: jiraField.id, value: jiraUrl });
+            `, { issueId: issueNodeId, fieldId, value: newValue });
 
-            console.log(`✅ Set "Jira Key" field to ${jiraUrl}`);
+            console.log(`✅ "Jira Key" field set to: ${newValue}`);
 
