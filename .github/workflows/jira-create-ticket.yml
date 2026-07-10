@@ -192,46 +192,40 @@ jobs:
             const jiraUrl  = `${process.env.JIRA_BASE_URL}/browse/${jiraKey}`;
             const issueNodeId = context.payload.issue.node_id;
 
-            // 1. Query available issue fields for this org/repo
+            // 1. Query the repository's Issue Fields (org/repo-level, GA July 2026).
+            //    issueFields.nodes is a union — inline-fragment each member for id/name.
             const fieldQuery = await github.graphql(`
-              query($issueId: ID!) {
-                node(id: $issueId) {
-                  ... on Issue {
-                    id
-                    issueType {
-                      id
-                      name
-                      fields(first: 30) {
-                        nodes { id name dataType }
-                      }
+              query($owner: String!, $repo: String!) {
+                repository(owner: $owner, name: $repo) {
+                  issueFields(first: 50) {
+                    nodes {
+                      __typename
+                      ... on IssueFieldText        { id name }
+                      ... on IssueFieldNumber      { id name }
+                      ... on IssueFieldDate        { id name }
+                      ... on IssueFieldSingleSelect { id name }
+                      ... on IssueFieldMultiSelect  { id name }
                     }
                   }
                 }
               }
-            `, { issueId: issueNodeId });
+            `, { owner, repo });
 
-            const issueType = fieldQuery.node.issueType;
-            if (!issueType) {
-              core.setFailed('This issue has no issue type set — cannot write to issue fields.');
-              return;
-            }
-
-            const fields = issueType.fields.nodes;
-            console.log(`Issue type "${issueType.name}" fields: ${fields.map(f => f.name).join(', ')}`);
+            const fields = fieldQuery.repository.issueFields.nodes;
+            console.log(`Available issue fields: ${fields.map(f => f.name).join(', ')}`);
 
             const jiraField = fields.find(f => f.name === 'Jira Key');
             if (!jiraField) {
-              core.setFailed(`Could not find "Jira Key" field. Available: ${fields.map(f => f.name).join(', ')}`);
+              core.setFailed(`Could not find "Jira Key" issue field. Available: ${fields.map(f => f.name).join(', ')}`);
               return;
             }
 
-            // 2. Set the field value on the issue
+            // 2. Set the text value on the issue via updateIssueFieldValue.
             await github.graphql(`
               mutation($issueId: ID!, $fieldId: ID!, $value: String!) {
                 updateIssueFieldValue(input: {
-                  issueId: $issueId,
-                  fieldId: $fieldId,
-                  value:   { text: $value }
+                  issueId:    $issueId,
+                  issueField: { fieldId: $fieldId, textValue: $value }
                 }) {
                   issue { id }
                 }
