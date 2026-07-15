@@ -1,10 +1,10 @@
-# {Insert Repository Name Here}
+# Automation Testing
 
-{Insert project information here}
+This respository is used by the Ed-Fi Alliance for testing automation processes in GitHub. 
 
 ## Legal Information
 
-Copyright (c) 2021 Ed-Fi Alliance, LLC and contributors.
+Copyright (c) 2026 Ed-Fi Alliance, LLC and contributors.
 
 Licensed under the [Apache License, Version 2.0](LICENSE) (the "License").
 
