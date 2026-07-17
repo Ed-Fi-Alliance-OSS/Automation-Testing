@@ -43,3 +43,50 @@ jobs:
           COUNT=$(jq 'length' tickets.json)
           echo "Found $COUNT labeled ticket(s)."
           jq -r '.[].key' tickets.json
+
+      - name: Mirror tickets to GitHub
+        uses: actions/github-script@v7
+        env:
+          JIRA_BASE_URL:   ${{ vars.JIRA_BASE_URL }}
+          JIRA_USER_EMAIL: ${{ secrets.CREATE_JIRA_TICKET_USER_EMAIL }}
+          JIRA_API_TOKEN:  ${{ secrets.CREATE_JIRA_TICKET_PAT }}
+        with:
+          script: |
+            const fs = require('fs');
+            const { owner, repo } = context.repo;
+            const jiraBase = process.env.JIRA_BASE_URL;
+            const jiraAuth = 'Basic ' + Buffer
+              .from(`${process.env.JIRA_USER_EMAIL}:${process.env.JIRA_API_TOKEN}`)
+              .toString('base64');
+
+            const jira = (path, init = {}) => fetch(`${jiraBase}${path}`, {
+              ...init,
+              headers: {
+                Authorization: jiraAuth,
+                Accept: 'application/json',
+                'Content-Type': 'application/json',
+                ...(init.headers || {}),
+              },
+            });
+
+            // A ticket is already mirrored if any remote link points at an
+            // issue in THIS repo.
+            const isAlreadyLinked = (remoteLinks, owner, repo) => {
+              const needle = `github.com/${owner}/${repo}/issues/`;
+              return remoteLinks.some(l => (l.object?.url || '').includes(needle));
+            };
+
+            const tickets = JSON.parse(fs.readFileSync('tickets.json', 'utf8'));
+            core.info(`Processing ${tickets.length} ticket(s).`);
+
+            for (const t of tickets) {
+              const rlRes = await jira(`/rest/api/3/issue/${t.key}/remotelink`);
+              if (!rlRes.ok) throw new Error(`remotelink GET ${t.key} → ${rlRes.status}`);
+              const remoteLinks = await rlRes.json();
+
+              if (isAlreadyLinked(remoteLinks, owner, repo)) {
+                core.info(`${t.key}: SKIP (already linked)`);
+                continue;
+              }
+              core.info(`${t.key}: CREATE (no existing link)`);
+            }
