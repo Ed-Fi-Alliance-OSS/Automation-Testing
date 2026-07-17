@@ -31,12 +31,12 @@ jobs:
       - name: Schedule gate
         id: gate
         env:
-          # Editable policy. Set repo variable SYNC_SCHEDULE to a JSON object, e.g.
+          # Editable policy. Set repo variable JIRA_TO_GH_SYNC_SCHEDULE to a JSON object, e.g.
           # {"timezone":"America/Chicago","workDays":[1,2,3,4,5],
           #  "workStartHour":8,"workEndHour":18,"offHoursIntervalHours":4}
           # workDays: ISO weekday numbers (1=Mon .. 7=Sun). Window is [start,end)
           # local hours; off-hours run once every N hours on the hour.
-          SYNC_SCHEDULE: ${{ vars.SYNC_SCHEDULE }}
+          JIRA_TO_GH_SYNC_SCHEDULE: ${{ vars.JIRA_TO_GH_SYNC_SCHEDULE }}
           EVAL_INPUT:    ${{ inputs.evaluate_schedule_window }}
         run: |
           set -euo pipefail
@@ -55,13 +55,13 @@ jobs:
             exit 0
           fi
 
-          # Policy: repo variable SYNC_SCHEDULE (JSON), else these defaults.
+          # Policy: repo variable JIRA_TO_GH_SYNC_SCHEDULE (JSON), else these defaults.
           CFG='{"timezone":"America/Chicago","workDays":[1,2,3,4,5],"workStartHour":8,"workEndHour":18,"offHoursIntervalHours":4}'
-          if [ -n "${SYNC_SCHEDULE:-}" ]; then
-            if echo "$SYNC_SCHEDULE" | jq -e . >/dev/null 2>&1; then
-              CFG="$SYNC_SCHEDULE"
+          if [ -n "${JIRA_TO_GH_SYNC_SCHEDULE:-}" ]; then
+            if echo "$JIRA_TO_GH_SYNC_SCHEDULE" | jq -e . >/dev/null 2>&1; then
+              CFG="$JIRA_TO_GH_SYNC_SCHEDULE"
             else
-              echo "::warning::SYNC_SCHEDULE is not valid JSON; using defaults."
+              echo "::warning::JIRA_TO_GH_SYNC_SCHEDULE is not valid JSON; using defaults."
             fi
           fi
 
