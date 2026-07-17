@@ -1,7 +1,8 @@
 name: Create GitHub Issues from labeled Jira tickets
 
 on:
-  # schedule is enabled in the final task; manual only until then
+  schedule:
+    - cron: '*/15 * * * *'
   workflow_dispatch:
 
 permissions:
