@@ -131,6 +131,40 @@ jobs:
                 },
               }) });
 
+            // Map existing issues by their "Jira Support Key" value (paginated).
+            const linkedByJiraUrl = new Map();
+            let after = null;
+            do {
+              const page = await github.graphql(`
+                query($owner:String!, $repo:String!, $after:String, $fieldId:ID!) {
+                  repository(owner:$owner, name:$repo) {
+                    issues(first:100, after:$after, states:[OPEN,CLOSED]) {
+                      pageInfo { hasNextPage endCursor }
+                      nodes {
+                        number title id
+                        issueFieldValues(first:50) {
+                          nodes {
+                            __typename
+                            ... on IssueFieldTextValue {
+                              value field { ... on IssueFieldText { id } }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }`, { owner, repo, after, fieldId: supportFieldId });
+              const conn = page.repository.issues;
+              for (const n of conn.nodes) {
+                const v = n.issueFieldValues.nodes
+                  .find(fv => fv.field && fv.field.id === supportFieldId);
+                if (v && v.value) {
+                  linkedByJiraUrl.set(v.value, { number: n.number, nodeId: n.id, title: n.title });
+                }
+              }
+              after = conn.pageInfo.hasNextPage ? conn.pageInfo.endCursor : null;
+            } while (after);
+
             for (const t of tickets) {
               const rlRes = await jira(`/rest/api/3/issue/${t.key}/remotelink`);
               if (!rlRes.ok) throw new Error(`remotelink GET ${t.key} → ${rlRes.status}`);
@@ -140,9 +174,24 @@ jobs:
                 core.info(`${t.key}: SKIP (already linked)`);
                 continue;
               }
+              const jiraUrl = `${jiraBase}/browse/${t.key}`;
+
+              // RECOVERY: an issue for this ticket may already exist (field set)
+              // but be missing its remote link from a prior partial run.
+              const existing = linkedByJiraUrl.get(jiraUrl);
+              if (existing) {
+                core.info(`${t.key}: RECOVER (found issue #${existing.number} by field; repairing link)`);
+                const relink = await addRemoteLink(t.key, {
+                  html_url: `https://github.com/${owner}/${repo}/issues/${existing.number}`,
+                  number: existing.number,
+                  title: existing.title,
+                });
+                if (!relink.ok) throw new Error(`remotelink POST ${t.key} → ${relink.status}`);
+                continue;
+              }
+
               core.info(`${t.key}: CREATE (no existing link)`);
 
-              const jiraUrl = `${jiraBase}/browse/${t.key}`;
               const body = adfToMarkdown(t.description);
 
               const created = await github.rest.issues.create({
