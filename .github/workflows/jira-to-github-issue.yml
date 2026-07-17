@@ -121,6 +121,16 @@ jobs:
                 }) { issue { id } }
               }`, { issueId: issueNodeId, fieldId: supportFieldId, value: jiraUrl });
 
+            const addRemoteLink = (key, issue) => jira(
+              `/rest/api/3/issue/${key}/remotelink`,
+              { method: 'POST', body: JSON.stringify({
+                object: {
+                  url: issue.html_url,
+                  title: `GitHub Issue #${issue.number}: ${issue.title}`,
+                  icon: { url16x16: 'https://github.com/favicon.ico', title: 'GitHub' },
+                },
+              }) });
+
             for (const t of tickets) {
               const rlRes = await jira(`/rest/api/3/issue/${t.key}/remotelink`);
               if (!rlRes.ok) throw new Error(`remotelink GET ${t.key} → ${rlRes.status}`);
@@ -143,4 +153,8 @@ jobs:
               // Set the field BEFORE the remote link so it can anchor recovery.
               await setSupportKey(created.data.node_id, jiraUrl);
               core.info(`${t.key}: set "Jira Support Key" = ${jiraUrl}`);
+
+              const linkRes = await addRemoteLink(t.key, created.data);
+              if (!linkRes.ok) throw new Error(`remotelink POST ${t.key} → ${linkRes.status}`);
+              core.info(`${t.key}: added Jira remote link`);
             }
