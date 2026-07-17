@@ -1,9 +1,17 @@
 name: Create GitHub Issues from labeled Jira tickets
 
 on:
+  # Cron cannot read a variable and is UTC-only, so it fires every 15 minutes and
+  # the "Schedule gate" step below applies the real, variable-driven window policy
+  # (workday cadence vs. off-hours interval, in a real timezone with DST).
   schedule:
     - cron: '*/15 * * * *'
   workflow_dispatch:
+    inputs:
+      evaluate_schedule_window:
+        description: "Apply the schedule window to this manual run (default: run now, ignoring the window)"
+        type: boolean
+        default: false
 
 concurrency:
   group: jira-to-github-issue
@@ -20,8 +28,71 @@ jobs:
   jira-to-github:
     runs-on: ubuntu-latest
     steps:
+      - name: Schedule gate
+        id: gate
+        env:
+          # Editable policy. Set repo variable SYNC_SCHEDULE to a JSON object, e.g.
+          # {"timezone":"America/Chicago","workDays":[1,2,3,4,5],
+          #  "workStartHour":8,"workEndHour":18,"offHoursIntervalHours":4}
+          # workDays: ISO weekday numbers (1=Mon .. 7=Sun). Window is [start,end)
+          # local hours; off-hours run once every N hours on the hour.
+          SYNC_SCHEDULE: ${{ vars.SYNC_SCHEDULE }}
+          EVAL_INPUT:    ${{ inputs.evaluate_schedule_window }}
+        run: |
+          set -euo pipefail
+
+          # Decide whether to apply the window at all. Scheduled ticks always apply
+          # it; manual runs skip it (run immediately) unless the input asks to apply it.
+          APPLY=false
+          if [ "${GITHUB_EVENT_NAME}" = "schedule" ]; then
+            APPLY=true
+          elif [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ "${EVAL_INPUT:-false}" = "true" ]; then
+            APPLY=true
+          fi
+          if [ "$APPLY" != "true" ]; then
+            echo "Event '${GITHUB_EVENT_NAME}' bypasses the window; proceeding."
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Policy: repo variable SYNC_SCHEDULE (JSON), else these defaults.
+          CFG='{"timezone":"America/Chicago","workDays":[1,2,3,4,5],"workStartHour":8,"workEndHour":18,"offHoursIntervalHours":4}'
+          if [ -n "${SYNC_SCHEDULE:-}" ]; then
+            if echo "$SYNC_SCHEDULE" | jq -e . >/dev/null 2>&1; then
+              CFG="$SYNC_SCHEDULE"
+            else
+              echo "::warning::SYNC_SCHEDULE is not valid JSON; using defaults."
+            fi
+          fi
+
+          TZID=$(echo "$CFG"  | jq -r '.timezone')
+          WSTART=$(echo "$CFG" | jq -r '.workStartHour')
+          WEND=$(echo "$CFG"   | jq -r '.workEndHour')
+          IVAL=$(echo "$CFG"   | jq -r '.offHoursIntervalHours')
+
+          # Current local time in the configured timezone (DST handled by tzdata).
+          DOW=$(TZ="$TZID" date +%u)                 # 1=Mon .. 7=Sun
+          HOUR=$((10#$(TZ="$TZID" date +%H)))         # 10# avoids octal on 08/09
+          MIN=$((10#$(TZ="$TZID" date +%M)))
+          echo "Local time ($TZID): DOW=$DOW HOUR=$HOUR MIN=$MIN"
+
+          IS_WORKDAY=$(echo "$CFG" | jq --argjson d "$DOW" '(.workDays | index($d)) != null')
+
+          PROCEED=false
+          REASON="off-hours, not an interval boundary"
+          if [ "$IS_WORKDAY" = "true" ] && [ "$HOUR" -ge "$WSTART" ] && [ "$HOUR" -lt "$WEND" ]; then
+            PROCEED=true
+            REASON="workday window ${WSTART}:00-${WEND}:00"
+          elif [ $((HOUR % IVAL)) -eq 0 ] && [ "$MIN" -lt 15 ]; then
+            PROCEED=true
+            REASON="off-hours ${IVAL}h interval boundary"
+          fi
+          echo "Decision: proceed=$PROCEED ($REASON)"
+          echo "proceed=$PROCEED" >> "$GITHUB_OUTPUT"
+
       - name: Query Jira for labeled tickets
         id: query
+        if: steps.gate.outputs.proceed == 'true'
         env:
           JIRA_BASE_URL:   ${{ vars.JIRA_BASE_URL }}
           JIRA_USER_EMAIL: ${{ secrets.CREATE_JIRA_TICKET_USER_EMAIL }}
