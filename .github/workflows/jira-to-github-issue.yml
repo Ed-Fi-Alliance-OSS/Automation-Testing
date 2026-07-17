@@ -95,6 +95,32 @@ jobs:
             const tickets = JSON.parse(fs.readFileSync('tickets.json', 'utf8'));
             core.info(`Processing ${tickets.length} ticket(s).`);
 
+            // Resolve the "Jira Support Key" issue-field id once.
+            const fieldQuery = await github.graphql(`
+              query($owner:String!, $repo:String!) {
+                repository(owner:$owner, name:$repo) {
+                  issueFields(first:100) {
+                    nodes { __typename ... on IssueFieldText { id name } }
+                  }
+                }
+              }`, { owner, repo });
+            const supportField = fieldQuery.repository.issueFields.nodes
+              .find(f => f.name === 'Jira Support Key');
+            if (!supportField) {
+              core.setFailed(`"Jira Support Key" field not found. Available: ` +
+                fieldQuery.repository.issueFields.nodes.map(f => f.name).join(', '));
+              return;
+            }
+            const supportFieldId = supportField.id;
+
+            const setSupportKey = (issueNodeId, jiraUrl) => github.graphql(`
+              mutation($issueId:ID!, $fieldId:ID!, $value:String!) {
+                updateIssueFieldValue(input:{
+                  issueId:$issueId,
+                  issueField:{ fieldId:$fieldId, textValue:$value }
+                }) { issue { id } }
+              }`, { issueId: issueNodeId, fieldId: supportFieldId, value: jiraUrl });
+
             for (const t of tickets) {
               const rlRes = await jira(`/rest/api/3/issue/${t.key}/remotelink`);
               if (!rlRes.ok) throw new Error(`remotelink GET ${t.key} → ${rlRes.status}`);
@@ -106,7 +132,15 @@ jobs:
               }
               core.info(`${t.key}: CREATE (no existing link)`);
 
-              // TEMPORARY (removed in Task 4): confirm ADF→Markdown conversion in the log.
+              const jiraUrl = `${jiraBase}/browse/${t.key}`;
               const body = adfToMarkdown(t.description);
-              core.info(`${t.key} body (first 200 chars): ${body.slice(0, 200)}`);
+
+              const created = await github.rest.issues.create({
+                owner, repo, title: t.summary, body,
+              });
+              core.info(`${t.key}: created issue #${created.data.number}`);
+
+              // Set the field BEFORE the remote link so it can anchor recovery.
+              await setSupportKey(created.data.node_id, jiraUrl);
+              core.info(`${t.key}: set "Jira Support Key" = ${jiraUrl}`);
             }
