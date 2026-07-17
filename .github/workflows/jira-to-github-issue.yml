@@ -44,6 +44,9 @@ jobs:
           echo "Found $COUNT labeled ticket(s)."
           jq -r '.[].key' tickets.json
 
+      - name: Install ADF → Markdown converter
+        run: npm install adf-to-md@1.2.1 --no-save --no-audit --no-fund --silent
+
       - name: Mirror tickets to GitHub
         uses: actions/github-script@v7
         env:
@@ -76,6 +79,19 @@ jobs:
               return remoteLinks.some(l => (l.object?.url || '').includes(needle));
             };
 
+            const { convert } = require('adf-to-md');
+            const adfToMarkdown = (adf) => {
+              if (!adf || !Array.isArray(adf.content) || adf.content.length === 0) {
+                return '';
+              }
+              try {
+                return convert(adf).result ?? '';
+              } catch (err) {
+                core.warning(`ADF conversion failed: ${err.message}`);
+                return '_(description could not be converted — see the linked Jira ticket)_';
+              }
+            };
+
             const tickets = JSON.parse(fs.readFileSync('tickets.json', 'utf8'));
             core.info(`Processing ${tickets.length} ticket(s).`);
 
@@ -89,4 +105,8 @@ jobs:
                 continue;
               }
               core.info(`${t.key}: CREATE (no existing link)`);
+
+              // TEMPORARY (removed in Task 4): confirm ADF→Markdown conversion in the log.
+              const body = adfToMarkdown(t.description);
+              core.info(`${t.key} body (first 200 chars): ${body.slice(0, 200)}`);
             }
