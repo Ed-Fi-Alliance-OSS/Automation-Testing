@@ -53,6 +53,7 @@ jobs:
           JIRA_BASE_URL:   ${{ vars.JIRA_BASE_URL }}
           JIRA_USER_EMAIL: ${{ secrets.CREATE_JIRA_TICKET_USER_EMAIL }}
           JIRA_API_TOKEN:  ${{ secrets.CREATE_JIRA_TICKET_PAT }}
+          TRIGGER_LABEL:   ${{ env.TRIGGER_LABEL }}
         with:
           script: |
             const fs = require('fs');
@@ -131,6 +132,17 @@ jobs:
                 },
               }) });
 
+            const removeLabel = async (key) => {
+              const res = await jira(`/rest/api/3/issue/${key}`, {
+                method: 'PUT',
+                body: JSON.stringify({
+                  update: { labels: [{ remove: process.env.TRIGGER_LABEL }] },
+                }),
+              });
+              if (!res.ok) throw new Error(`label remove ${key} → ${res.status}`);
+              core.info(`${key}: removed label "${process.env.TRIGGER_LABEL}"`);
+            };
+
             // Map existing issues by their "Jira Support Key" value (paginated).
             const linkedByJiraUrl = new Map();
             let after = null;
@@ -172,6 +184,7 @@ jobs:
 
               if (isAlreadyLinked(remoteLinks, owner, repo)) {
                 core.info(`${t.key}: SKIP (already linked)`);
+                await removeLabel(t.key);
                 continue;
               }
               const jiraUrl = `${jiraBase}/browse/${t.key}`;
@@ -187,6 +200,7 @@ jobs:
                   title: existing.title,
                 });
                 if (!relink.ok) throw new Error(`remotelink POST ${t.key} → ${relink.status}`);
+                await removeLabel(t.key);
                 continue;
               }
 
@@ -206,4 +220,5 @@ jobs:
               const linkRes = await addRemoteLink(t.key, created.data);
               if (!linkRes.ok) throw new Error(`remotelink POST ${t.key} → ${linkRes.status}`);
               core.info(`${t.key}: added Jira remote link`);
+              await removeLabel(t.key);
             }
