@@ -1,0 +1,45 @@
+name: Create GitHub Issues from labeled Jira tickets
+
+on:
+  # schedule is enabled in the final task; manual only until then
+  workflow_dispatch:
+
+permissions:
+  issues: write
+
+env:
+  JIRA_PROJECT_KEY: EDFI
+  TRIGGER_LABEL: send-to-gh
+
+jobs:
+  jira-to-github:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Query Jira for labeled tickets
+        env:
+          JIRA_BASE_URL:   ${{ vars.JIRA_BASE_URL }}
+          JIRA_USER_EMAIL: ${{ secrets.CREATE_JIRA_TICKET_USER_EMAIL }}
+          JIRA_API_TOKEN:  ${{ secrets.CREATE_JIRA_TICKET_PAT }}
+        run: |
+          set -euo pipefail
+          JQL="project = ${JIRA_PROJECT_KEY} AND labels = \"${TRIGGER_LABEL}\""
+          echo "JQL: $JQL"
+
+          RESPONSE=$(curl --silent --show-error --fail \
+            --request POST \
+            --url "${JIRA_BASE_URL}/rest/api/3/search/jql" \
+            --user "${JIRA_USER_EMAIL}:${JIRA_API_TOKEN}" \
+            --header "Accept: application/json" \
+            --header "Content-Type: application/json" \
+            --data "$(jq -n --arg jql "$JQL" \
+              '{ jql: $jql, fields: ["summary","description"], maxResults: 100 }')")
+
+          echo "$RESPONSE" | jq '[.issues[] | {
+            key: .key,
+            summary: .fields.summary,
+            description: .fields.description
+          }]' > tickets.json
+
+          COUNT=$(jq 'length' tickets.json)
+          echo "Found $COUNT labeled ticket(s)."
+          jq -r '.[].key' tickets.json
