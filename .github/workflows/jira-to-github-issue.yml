@@ -136,7 +136,7 @@ jobs:
             let after = null;
             do {
               const page = await github.graphql(`
-                query($owner:String!, $repo:String!, $after:String, $fieldId:ID!) {
+                query($owner:String!, $repo:String!, $after:String) {
                   repository(owner:$owner, name:$repo) {
                     issues(first:100, after:$after, states:[OPEN,CLOSED]) {
                       pageInfo { hasNextPage endCursor }
@@ -153,7 +153,7 @@ jobs:
                       }
                     }
                   }
-                }`, { owner, repo, after, fieldId: supportFieldId });
+                }`, { owner, repo, after });
               const conn = page.repository.issues;
               for (const n of conn.nodes) {
                 const v = n.issueFieldValues.nodes
