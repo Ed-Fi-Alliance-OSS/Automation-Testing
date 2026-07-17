@@ -177,48 +177,63 @@ jobs:
               after = conn.pageInfo.hasNextPage ? conn.pageInfo.endCursor : null;
             } while (after);
 
+            const stats = { created: 0, recovered: 0, skipped: 0, labelRemoved: 0, errors: 0 };
             for (const t of tickets) {
-              const rlRes = await jira(`/rest/api/3/issue/${t.key}/remotelink`);
-              if (!rlRes.ok) throw new Error(`remotelink GET ${t.key} → ${rlRes.status}`);
-              const remoteLinks = await rlRes.json();
+              try {
+                const rlRes = await jira(`/rest/api/3/issue/${t.key}/remotelink`);
+                if (!rlRes.ok) throw new Error(`remotelink GET ${t.key} → ${rlRes.status}`);
+                const remoteLinks = await rlRes.json();
 
-              if (isAlreadyLinked(remoteLinks, owner, repo)) {
-                core.info(`${t.key}: SKIP (already linked)`);
-                await removeLabel(t.key);
-                continue;
-              }
-              const jiraUrl = `${jiraBase}/browse/${t.key}`;
+                if (isAlreadyLinked(remoteLinks, owner, repo)) {
+                  core.info(`${t.key}: SKIP (already linked)`);
+                  stats.skipped++;
+                  await removeLabel(t.key);
+                  stats.labelRemoved++;
+                  continue;
+                }
+                const jiraUrl = `${jiraBase}/browse/${t.key}`;
 
-              // RECOVERY: an issue for this ticket may already exist (field set)
-              // but be missing its remote link from a prior partial run.
-              const existing = linkedByJiraUrl.get(jiraUrl);
-              if (existing) {
-                core.info(`${t.key}: RECOVER (found issue #${existing.number} by field; repairing link)`);
-                const relink = await addRemoteLink(t.key, {
-                  html_url: `https://github.com/${owner}/${repo}/issues/${existing.number}`,
-                  number: existing.number,
-                  title: existing.title,
+                // RECOVERY: an issue for this ticket may already exist (field set)
+                // but be missing its remote link from a prior partial run.
+                const existing = linkedByJiraUrl.get(jiraUrl);
+                if (existing) {
+                  core.info(`${t.key}: RECOVER (found issue #${existing.number} by field; repairing link)`);
+                  const relink = await addRemoteLink(t.key, {
+                    html_url: `https://github.com/${owner}/${repo}/issues/${existing.number}`,
+                    number: existing.number,
+                    title: existing.title,
+                  });
+                  if (!relink.ok) throw new Error(`remotelink POST ${t.key} → ${relink.status}`);
+                  stats.recovered++;
+                  await removeLabel(t.key);
+                  stats.labelRemoved++;
+                  continue;
+                }
+
+                core.info(`${t.key}: CREATE (no existing link)`);
+
+                const body = adfToMarkdown(t.description);
+
+                const created = await github.rest.issues.create({
+                  owner, repo, title: t.summary, body,
                 });
-                if (!relink.ok) throw new Error(`remotelink POST ${t.key} → ${relink.status}`);
+                core.info(`${t.key}: created issue #${created.data.number}`);
+
+                // Set the field BEFORE the remote link so it can anchor recovery.
+                await setSupportKey(created.data.node_id, jiraUrl);
+                core.info(`${t.key}: set "Jira Support Key" = ${jiraUrl}`);
+
+                const linkRes = await addRemoteLink(t.key, created.data);
+                if (!linkRes.ok) throw new Error(`remotelink POST ${t.key} → ${linkRes.status}`);
+                core.info(`${t.key}: added Jira remote link`);
+                stats.created++;
                 await removeLabel(t.key);
-                continue;
+                stats.labelRemoved++;
+              } catch (err) {
+                stats.errors++;
+                core.error(`${t.key}: ${err.message}`);
               }
-
-              core.info(`${t.key}: CREATE (no existing link)`);
-
-              const body = adfToMarkdown(t.description);
-
-              const created = await github.rest.issues.create({
-                owner, repo, title: t.summary, body,
-              });
-              core.info(`${t.key}: created issue #${created.data.number}`);
-
-              // Set the field BEFORE the remote link so it can anchor recovery.
-              await setSupportKey(created.data.node_id, jiraUrl);
-              core.info(`${t.key}: set "Jira Support Key" = ${jiraUrl}`);
-
-              const linkRes = await addRemoteLink(t.key, created.data);
-              if (!linkRes.ok) throw new Error(`remotelink POST ${t.key} → ${linkRes.status}`);
-              core.info(`${t.key}: added Jira remote link`);
-              await removeLabel(t.key);
             }
+            core.info(`Summary → created:${stats.created} recovered:${stats.recovered} ` +
+              `skipped:${stats.skipped} labelRemoved:${stats.labelRemoved} errors:${stats.errors}`);
+            if (stats.errors > 0) core.setFailed(`${stats.errors} ticket(s) failed.`);
