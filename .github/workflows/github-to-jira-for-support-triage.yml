@@ -1,0 +1,223 @@
+name: Create Jira Ticket from External Issue
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  issues: write
+
+jobs:
+  create-jira-ticket:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: jira-create-from-external-issue-${{ github.event.issue.node_id }}
+      cancel-in-progress: false
+    steps:
+      - name: Check if issue author is external to the organization
+        id: external_check
+        env:
+          AUTHOR_ASSOCIATION: ${{ github.event.issue.author_association }}
+        run: |
+          # TEMP: org/external check disabled for testing — always proceed.
+          # Restore the block below to re-enable the external-submitter gate.
+          echo "⚠️ External check bypassed (testing). Treating author as external."
+          echo "is_external=true" >> "$GITHUB_OUTPUT"
+
+          # author_association comes straight from the issue payload — no PAT or API call.
+          # Treat org insiders as internal; everyone else counts as external.
+          # case "$AUTHOR_ASSOCIATION" in
+          #   OWNER|MEMBER|COLLABORATOR)
+          #     echo "Author association '$AUTHOR_ASSOCIATION' is internal. Skipping."
+          #     echo "is_external=false" >> "$GITHUB_OUTPUT"
+          #     ;;
+          #   *)
+          #     echo "Author association '$AUTHOR_ASSOCIATION' is external. Proceeding."
+          #     echo "is_external=true" >> "$GITHUB_OUTPUT"
+          #     ;;
+          # esac
+
+      - name: Check for existing Jira ticket for this project
+        if: steps.external_check.outputs.is_external == 'true'
+        id: check_existing
+        uses: actions/github-script@v7
+        env:
+          JIRA_SUPPORT_PROJECT_KEY: ${{ vars.JIRA_SUPPORT_PROJECT_KEY }}
+        with:
+          script: |
+            const owner         = context.repo.owner;
+            const repo          = context.repo.repo;
+            const issueNodeId   = context.payload.issue.node_id;
+            const targetProject = process.env.JIRA_SUPPORT_PROJECT_KEY;
+
+            if (!targetProject) {
+              core.setFailed('JIRA_SUPPORT_PROJECT_KEY variable is not set.');
+              return;
+            }
+
+            // One query: the repo's "Jira Support Key" field definition + this issue's current value.
+            const result = await github.graphql(`
+              query($owner: String!, $repo: String!, $issueId: ID!) {
+                repository(owner: $owner, name: $repo) {
+                  issueFields(first: 100) {
+                    nodes {
+                      __typename
+                      ... on IssueFieldText { id name }
+                    }
+                  }
+                }
+                node(id: $issueId) {
+                  ... on Issue {
+                    issueFieldValues(first: 100) {
+                      nodes {
+                        __typename
+                        ... on IssueFieldTextValue {
+                          value
+                          field { ... on IssueFieldText { id name } }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            `, { owner, repo, issueId: issueNodeId });
+
+            const fields = result.repository.issueFields.nodes;
+            const jiraField = fields.find(f => f.name === 'Jira Support Key');
+            if (!jiraField) {
+              core.setFailed(`Could not find "Jira Support Key" issue field. Available: ${fields.map(f => f.name).join(', ')}`);
+              return;
+            }
+            core.setOutput('field_id', jiraField.id);
+
+            const valueNode = result.node.issueFieldValues.nodes
+              .find(v => v.field && v.field.id === jiraField.id);
+            const existingValue = valueNode ? valueNode.value : '';
+            core.setOutput('existing_value', existingValue);
+
+            // Extract the project prefix from each stored ".../browse/KEY-123" URL.
+            const existingProjects = existingValue
+              .split(',')
+              .map(s => s.trim())
+              .filter(Boolean)
+              .map(url => {
+                const m = url.match(/\/browse\/([A-Za-z][A-Za-z0-9]+)-\d+/);
+                return m ? m[1] : null;
+              })
+              .filter(Boolean);
+
+            const alreadyExists = existingProjects.includes(targetProject);
+            core.setOutput('already_exists', String(alreadyExists));
+
+            if (alreadyExists) {
+              console.log(`Project ${targetProject} already has a ticket for this issue (field: "${existingValue}") — skipping.`);
+            } else {
+              console.log(`No ${targetProject} ticket yet (existing projects: ${existingProjects.join(', ') || 'none'}) — will create.`);
+            }
+
+      - name: Create Jira Ticket
+        if: steps.external_check.outputs.is_external == 'true' && steps.check_existing.outputs.already_exists == 'false'
+        id: create_ticket
+        env:
+          JIRA_BASE_URL:    ${{ vars.JIRA_BASE_URL }}
+          JIRA_SUPPORT_PROJECT_KEY: ${{ vars.JIRA_SUPPORT_PROJECT_KEY }}
+          JIRA_ISSUE_TYPE:  ${{ vars.JIRA_ISSUE_TYPE }}
+          JIRA_USER_EMAIL:  ${{ secrets.CREATE_JIRA_TICKET_USER_EMAIL }}
+          JIRA_API_TOKEN:   ${{ secrets.CREATE_JIRA_TICKET_PAT }}
+          ISSUE_TITLE:      ${{ github.event.issue.title }}
+          ISSUE_BODY:       ${{ github.event.issue.body }}
+        run: |
+          PAYLOAD=$(jq -n \
+            --arg summary     "${ISSUE_TITLE}" \
+            --arg project     "${JIRA_SUPPORT_PROJECT_KEY}" \
+            --arg issuetype   "${JIRA_ISSUE_TYPE:-Story}" \
+            --arg description "${ISSUE_BODY}" \
+            '{
+              fields: {
+                project:     { key: $project },
+                summary:     $summary,
+                issuetype:   { name: $issuetype },
+                description: {
+                  type: "doc", version: 1,
+                  content: [{ type: "paragraph",
+                    content: [{ type: "text", text: $description }]
+                  }]
+                }
+              }
+            }')
+
+          RESPONSE=$(curl --silent --show-error --fail \
+            --request POST \
+            --url "${JIRA_BASE_URL}/rest/api/3/issue" \
+            --user "${JIRA_USER_EMAIL}:${JIRA_API_TOKEN}" \
+            --header "Accept: application/json" \
+            --header "Content-Type: application/json" \
+            --data "$PAYLOAD")
+
+          JIRA_KEY=$(echo "$RESPONSE" | jq -r '.key')
+          echo "jira_key=$JIRA_KEY" >> "$GITHUB_OUTPUT"
+          echo "✅ Created Jira ticket: $JIRA_KEY"
+
+      - name: Add GitHub issue link to Jira ticket
+        if: steps.external_check.outputs.is_external == 'true' && steps.check_existing.outputs.already_exists == 'false'
+        env:
+          JIRA_BASE_URL:   ${{ vars.JIRA_BASE_URL }}
+          JIRA_USER_EMAIL: ${{ secrets.CREATE_JIRA_TICKET_USER_EMAIL }}
+          JIRA_API_TOKEN:  ${{ secrets.CREATE_JIRA_TICKET_PAT }}
+          JIRA_KEY:        ${{ steps.create_ticket.outputs.jira_key }}
+          ISSUE_URL:       ${{ github.event.issue.html_url }}
+          ISSUE_TITLE:     ${{ github.event.issue.title }}
+          ISSUE_NUMBER:    ${{ github.event.issue.number }}
+        run: |
+          curl --silent --show-error --fail \
+            --request POST \
+            --url "${JIRA_BASE_URL}/rest/api/3/issue/${JIRA_KEY}/remotelink" \
+            --user "${JIRA_USER_EMAIL}:${JIRA_API_TOKEN}" \
+            --header "Accept: application/json" \
+            --header "Content-Type: application/json" \
+            --data "$(jq -n \
+              --arg url   "${ISSUE_URL}" \
+              --arg title "GitHub Issue #${ISSUE_NUMBER}: ${ISSUE_TITLE}" \
+              '{
+                object: {
+                  url:   $url,
+                  title: $title,
+                  icon: {
+                    url16x16: "https://github.com/favicon.ico",
+                    title:    "GitHub"
+                  }
+                }
+              }'
+            )"
+          echo "✅ Remote link added to Jira ticket"
+
+      - name: Append Jira URL to issue "Jira Support Key" field
+        if: steps.external_check.outputs.is_external == 'true' && steps.check_existing.outputs.already_exists == 'false'
+        uses: actions/github-script@v7
+        env:
+          JIRA_BASE_URL:  ${{ vars.JIRA_BASE_URL }}
+          FIELD_ID:       ${{ steps.check_existing.outputs.field_id }}
+          EXISTING_VALUE: ${{ steps.check_existing.outputs.existing_value }}
+        with:
+          script: |
+            const jiraKey     = '${{ steps.create_ticket.outputs.jira_key }}';
+            const jiraUrl     = `${process.env.JIRA_BASE_URL}/browse/${jiraKey}`;
+            const issueNodeId = context.payload.issue.node_id;
+            const fieldId     = process.env.FIELD_ID;
+            const existing    = process.env.EXISTING_VALUE || '';
+
+            // Append the new ticket URL, comma-separated, preserving any existing entries.
+            const newValue = existing ? `${existing},${jiraUrl}` : jiraUrl;
+
+            await github.graphql(`
+              mutation($issueId: ID!, $fieldId: ID!, $value: String!) {
+                updateIssueFieldValue(input: {
+                  issueId:    $issueId,
+                  issueField: { fieldId: $fieldId, textValue: $value }
+                }) {
+                  issue { id }
+                }
+              }
+            `, { issueId: issueNodeId, fieldId, value: newValue });
+
+            console.log(`✅ "Jira Support Key" field set to: ${newValue}`);
