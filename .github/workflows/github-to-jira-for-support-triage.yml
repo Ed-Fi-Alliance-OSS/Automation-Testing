@@ -37,6 +37,30 @@ jobs:
           #     ;;
           # esac
 
+      - name: Resolve Jira issue type from issue labels
+        if: steps.external_check.outputs.is_external == 'true'
+        id: jira_meta
+        env:
+          LABELS:       ${{ toJson(github.event.issue.labels) }}
+          TYPE_MAP:     ${{ vars.JIRA_GH_TYPE_MAP }}
+          DEFAULT_TYPE: ${{ vars.JIRA_ISSUE_TYPE }}
+        run: |
+          # Validate type map JSON (required for --argjson)
+          if [ -z "$TYPE_MAP" ] || ! echo "$TYPE_MAP" | jq -e . >/dev/null 2>&1; then
+            echo "JIRA_GH_TYPE_MAP must be set to valid JSON (e.g., {\"bug\":\"Bug\"})." >&2
+            exit 1
+          fi
+
+          # Walk the issue's labels; first one that appears in the map wins.
+          TYPE=$(echo "$LABELS" | jq -r --argjson map "$TYPE_MAP" '
+            .[] | .name as $label | $map[$label] // empty
+          ' | head -1)
+
+          # Fallback order: matched label type -> JIRA_ISSUE_TYPE var -> Story
+          RESOLVED="${TYPE:-${DEFAULT_TYPE:-Story}}"
+          echo "issue_type=$RESOLVED" >> "$GITHUB_OUTPUT"
+          echo "✅ Resolved issue type: $RESOLVED (matched label type: ${TYPE:-none})"
+
       - name: Check for existing Jira ticket for this project
         if: steps.external_check.outputs.is_external == 'true'
         id: check_existing
@@ -121,7 +145,7 @@ jobs:
         env:
           JIRA_BASE_URL:    ${{ vars.JIRA_BASE_URL }}
           JIRA_SUPPORT_PROJECT_KEY: ${{ vars.JIRA_SUPPORT_PROJECT_KEY }}
-          JIRA_ISSUE_TYPE:  ${{ vars.JIRA_ISSUE_TYPE }}
+          JIRA_ISSUE_TYPE:  ${{ steps.jira_meta.outputs.issue_type }}
           JIRA_USER_EMAIL:  ${{ secrets.CREATE_JIRA_TICKET_USER_EMAIL }}
           JIRA_API_TOKEN:   ${{ secrets.CREATE_JIRA_TICKET_PAT }}
           ISSUE_TITLE:      ${{ github.event.issue.title }}
