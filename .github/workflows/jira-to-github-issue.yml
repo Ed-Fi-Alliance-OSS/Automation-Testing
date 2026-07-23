@@ -225,6 +225,18 @@ jobs:
                 }`, { id: issueNodeId, typeId });
             };
 
+            // Project label transform: Jira "project-<x>" -> GitHub "gh-<x>".
+            const PROJECT_PREFIX = 'project-';
+            const GH_LABEL_PREFIX = 'gh-';
+            const projectLabelsFor = (jiraLabels) =>
+              (jiraLabels || [])
+                .filter(l => l.toLowerCase().startsWith(PROJECT_PREFIX))
+                .map(l => GH_LABEL_PREFIX + l.slice(PROJECT_PREFIX.length));
+            const existingLabels = new Set(
+              (await github.paginate(github.rest.issues.listLabelsForRepo, { owner, repo, per_page: 100 }))
+                .map(l => l.name.toLowerCase())
+            );
+
             const stats = { created: 0, recovered: 0, skipped: 0, labelRemoved: 0, errors: 0 };
             for (const t of tickets) {
               try {
@@ -269,6 +281,18 @@ jobs:
 
                 await setIssueType(created.data.node_id, t.issuetype);
                 core.info(`${t.key}: issue type set from Jira "${t.issuetype}"`);
+
+                const candidateLabels = projectLabelsFor(t.labels);
+                const applyLabels = candidateLabels.filter(n => existingLabels.has(n.toLowerCase()));
+                for (const missing of candidateLabels.filter(n => !existingLabels.has(n.toLowerCase()))) {
+                  core.warning(`${t.key}: project label '${missing}' not found in repo; skipping`);
+                }
+                if (applyLabels.length > 0) {
+                  await github.rest.issues.addLabels({
+                    owner, repo, issue_number: created.data.number, labels: applyLabels,
+                  });
+                  core.info(`${t.key}: applied project label(s) ${applyLabels.join(', ')}`);
+                }
 
                 // Set the field BEFORE the remote link so it can anchor recovery.
                 await setSupportKey(created.data.node_id, jiraUrl);
