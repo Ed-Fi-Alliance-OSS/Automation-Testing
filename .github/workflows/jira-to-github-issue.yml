@@ -225,13 +225,13 @@ jobs:
                 }`, { id: issueNodeId, typeId });
             };
 
-            // Project label transform: Jira "project-<x>" -> GitHub "gh-<x>".
-            const PROJECT_PREFIX = 'project-';
-            const GH_LABEL_PREFIX = 'gh-';
+            // Project label transform: Jira "gh-<x>" -> GitHub "<x>".
+            // The gh- prefix is the Jira-side selector and is stripped for GitHub.
+            const PROJECT_PREFIX = 'gh-';
             const projectLabelsFor = (jiraLabels) =>
               (jiraLabels || [])
                 .filter(l => l.toLowerCase().startsWith(PROJECT_PREFIX))
-                .map(l => GH_LABEL_PREFIX + l.slice(PROJECT_PREFIX.length));
+                .map(l => l.slice(PROJECT_PREFIX.length));
             const existingLabels = new Set(
               (await github.paginate(github.rest.issues.listLabelsForRepo, { owner, repo, per_page: 100 }))
                 .map(l => l.name.toLowerCase())
