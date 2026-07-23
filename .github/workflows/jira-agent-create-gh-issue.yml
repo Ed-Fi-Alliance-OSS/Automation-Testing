@@ -1,0 +1,196 @@
+name: Create GitHub Issue from Jira agent
+
+# Triggered on-demand by the Jira AI bridge agent (see Jira instructions.md) via a
+# workflow_dispatch call. The agent composes the title/body/labels; this workflow is a
+# thin receiver that creates the issue, applies labels (auto-creating any that are
+# missing), moves the Jira browse link out of the body, and stores it in the native
+# GitHub issue field "Jira Support Key".
+
+on:
+  workflow_dispatch:
+    inputs:
+      title:
+        description: "Issue title (Jira summary)"
+        required: true
+        type: string
+      body:
+        description: "Issue body in Markdown (includes the Jira browse link)"
+        required: true
+        type: string
+      labels:
+        description: "Comma-separated labels (optional), e.g. dms-platform,bug,priority:medium"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  issues: write
+
+jobs:
+  create-issue:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create issue, apply labels, set Jira Support Key field
+        uses: actions/github-script@v7
+        env:
+          # Pass inputs through env (not string-interpolated into the script) to avoid
+          # script injection from Jira-sourced content.
+          INPUT_TITLE: ${{ inputs.title }}
+          INPUT_BODY: ${{ inputs.body }}
+          INPUT_LABELS: ${{ inputs.labels }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+
+            const title = (process.env.INPUT_TITLE || '').trim();
+            const rawBody = process.env.INPUT_BODY || '';
+            const labelsInput = process.env.INPUT_LABELS || '';
+
+            const SUPPORT_FIELD_NAME = 'Jira Support Key';
+
+            // 1. Validate title -------------------------------------------------------
+            if (!title) {
+              core.setFailed('The "title" input is empty. A GitHub issue requires a title.');
+              return;
+            }
+
+            // 2. Labels: create any that are missing so issue creation never fails ----
+            const labels = labelsInput.split(',').map(s => s.trim()).filter(Boolean);
+            for (const name of labels) {
+              try {
+                await github.rest.issues.getLabel({ owner, repo, name });
+              } catch (e) {
+                if (e.status === 404) {
+                  try {
+                    await github.rest.issues.createLabel({ owner, repo, name });
+                    core.info(`Created label "${name}"`);
+                  } catch (ce) {
+                    core.warning(`Could not create label "${name}": ${ce.message}`);
+                  }
+                } else {
+                  core.warning(`Could not check label "${name}": ${e.message}`);
+                }
+              }
+            }
+
+            // 3. Extract the Jira browse link from the body --------------------------
+            // The browse-URL shape is stable, so it is the reliable anchor regardless
+            // of the surrounding Markdown the agent produced.
+            const jiraUrlRegex = /https?:\/\/[a-z0-9.-]+\.atlassian\.net\/browse\/[A-Z][A-Z0-9]+-\d+/i;
+            const match = rawBody.match(jiraUrlRegex);
+            const jiraUrl = match ? match[0] : null;
+            if (!jiraUrl) {
+              core.warning(`No Jira browse link found in body; "${SUPPORT_FIELD_NAME}" will be left unset.`);
+            }
+
+            // If we have a Jira URL, resolve the target field id BEFORE creating the
+            // issue, so a misconfigured repo fails fast without leaving an orphan issue.
+            let supportFieldId = null;
+            if (jiraUrl) {
+              const fieldQuery = await github.graphql(`
+                query($owner:String!, $repo:String!) {
+                  repository(owner:$owner, name:$repo) {
+                    issueFields(first:100) {
+                      nodes { __typename ... on IssueFieldText { id name } }
+                    }
+                  }
+                }`, { owner, repo });
+              const nodes = fieldQuery.repository.issueFields.nodes || [];
+              const field = nodes.find(f => f.name === SUPPORT_FIELD_NAME);
+              if (!field) {
+                core.setFailed(
+                  `"${SUPPORT_FIELD_NAME}" issue field not found. Available: ` +
+                  nodes.map(f => f.name).filter(Boolean).join(', '));
+                return;
+              }
+              supportFieldId = field.id;
+            }
+
+            // Helper: remove the Jira link (and any footer left behind) from a body.
+            const stripJiraLink = (text, url) => {
+              const escaped = url.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+              const mdLinkRe = new RegExp(`\\[[^\\]]*\\]\\(${escaped}\\)`, 'g');
+              const urlRe = new RegExp(escaped, 'g');
+              const urlTest = new RegExp(escaped);
+
+              const out = [];
+              for (const line of text.split('\n')) {
+                if (!urlTest.test(line)) { out.push(line); continue; }
+                let l = line.replace(mdLinkRe, '').replace(urlRe, '');
+                // Strip a leading label such as "Jira:", "Jira ticket:", etc.
+                l = l.replace(/^\s*(?:[-*>]\s*)?(?:\*\*|__)?\s*jira[^:]*:\s*(?:\*\*|__)?\s*/i, '');
+                // Drop leftover empty link remnants / emphasis, then trim.
+                l = l.replace(/\[\s*\]\(\s*\)/g, '').replace(/`+/g, '').trim();
+                // If nothing meaningful remains (empty or only a separator), drop it.
+                if (l === '' || /^[-*_\s|>]+$/.test(l)) continue;
+                out.push(l);
+              }
+              let cleaned = out.join('\n').replace(/\s+$/, '');
+              // Remove up to a few trailing horizontal rules left dangling as a footer.
+              for (let i = 0; i < 3; i++) {
+                const trimmed = cleaned.replace(/(?:\r?\n)+[ \t]*(?:-{3,}|\*{3,}|_{3,})[ \t]*$/, '');
+                if (trimmed === cleaned) break;
+                cleaned = trimmed.replace(/\s+$/, '');
+              }
+              return cleaned;
+            };
+
+            // 4. Create the issue with the ORIGINAL body (Jira link left intact) -----
+            // The link stays in the body until the field is confirmed set, so that a
+            // failure while setting the field can never leave the issue with no
+            // reference back to its Jira ticket.
+            const created = await github.rest.issues.create({
+              owner, repo,
+              title,
+              body: rawBody,
+              labels: labels.length ? labels : undefined,
+            });
+            core.info(`Created issue #${created.data.number}: ${created.data.html_url}`);
+
+            // 5. Set the field, THEN strip the link from the body --------------------
+            if (jiraUrl && supportFieldId) {
+              // Set the field first. If it fails, keep the body link (the records stay
+              // linked) and fail the run loudly.
+              try {
+                await github.graphql(`
+                  mutation($issueId:ID!, $fieldId:ID!, $value:String!) {
+                    updateIssueFieldValue(input:{
+                      issueId:$issueId,
+                      issueField:{ fieldId:$fieldId, textValue:$value }
+                    }) { issue { id } }
+                  }`, { issueId: created.data.node_id, fieldId: supportFieldId, value: jiraUrl });
+                core.info(`Set "${SUPPORT_FIELD_NAME}" = ${jiraUrl}`);
+              } catch (err) {
+                core.setFailed(
+                  `Created issue #${created.data.number}, but failed to set ` +
+                  `"${SUPPORT_FIELD_NAME}": ${err.message}. The Jira link was left in the ` +
+                  `issue body, so the records remain linked — fix the field manually.`);
+                return;
+              }
+
+              // Field is set — now it is safe to remove the link from the body.
+              const cleanedBody = stripJiraLink(rawBody, jiraUrl);
+              if (cleanedBody !== rawBody) {
+                try {
+                  await github.rest.issues.update({
+                    owner, repo, issue_number: created.data.number, body: cleanedBody,
+                  });
+                  core.info('Removed Jira link from body (now stored in the field).');
+                } catch (err) {
+                  core.warning(
+                    `Field set, but could not strip the Jira link from the body: ` +
+                    `${err.message}. The link remains in the body (harmless, just redundant).`);
+                }
+              }
+            }
+
+            // 6. Job summary ---------------------------------------------------------
+            await core.summary
+              .addHeading('Jira → GitHub issue created', 2)
+              .addList([
+                `Issue: #${created.data.number}`,
+                `URL: ${created.data.html_url}`,
+                `Labels: ${labels.join(', ') || '(none)'}`,
+                `${SUPPORT_FIELD_NAME}: ${jiraUrl || '(no Jira link found in body)'}`,
+              ])
+              .write();
