@@ -54,9 +54,33 @@ jobs:
               return;
             }
 
-            // 2. Labels: create any that are missing so issue creation never fails ----
-            const labels = labelsInput.split(',').map(s => s.trim()).filter(Boolean);
-            for (const name of labels) {
+            // 2. Parse labels: "type:*" → native issue Type, "priority:*" → Priority
+            //    field, everything else stays a normal label (auto-created if missing).
+            // Unmapped type:/priority: values are dropped entirely (not kept as labels).
+            const TYPE_MAP = { feature: 'Feature', enhancement: 'Feature', bug: 'Bug' };
+            const PRIORITY_MAP = { critical: 'Urgent', high: 'High', medium: 'Medium', low: 'Low' };
+
+            let typeName = null;       // native issue-type name to set (or null)
+            let priorityName = null;   // Priority option name to set (or null)
+            const plainLabels = [];
+
+            for (const raw of labelsInput.split(',').map(s => s.trim()).filter(Boolean)) {
+              const lower = raw.toLowerCase();
+              if (lower.startsWith('type:')) {
+                const mapped = TYPE_MAP[lower.slice(5).trim()];
+                if (mapped) typeName = mapped;
+                else core.info(`Dropping unmapped type label "${raw}"`);
+              } else if (lower.startsWith('priority:')) {
+                const mapped = PRIORITY_MAP[lower.slice(9).trim()];
+                if (mapped) priorityName = mapped;
+                else core.info(`Dropping unmapped priority label "${raw}"`);
+              } else {
+                plainLabels.push(raw);
+              }
+            }
+
+            // Create any missing plain labels so issue creation never fails on one.
+            for (const name of plainLabels) {
               try {
                 await github.rest.issues.getLabel({ owner, repo, name });
               } catch (e) {
@@ -143,9 +167,65 @@ jobs:
               owner, repo,
               title,
               body: rawBody,
-              labels: labels.length ? labels : undefined,
+              labels: plainLabels.length ? plainLabels : undefined,
             });
             core.info(`Created issue #${created.data.number}: ${created.data.html_url}`);
+
+            // Set the native issue Type (best-effort; not linkage-critical).
+            if (typeName) {
+              try {
+                const tq = await github.graphql(`
+                  query($owner:String!, $repo:String!) {
+                    repository(owner:$owner, name:$repo) {
+                      issueTypes(first:20) { nodes { id name } }
+                    }
+                  }`, { owner, repo });
+                const t = (tq.repository.issueTypes.nodes || []).find(x => x.name === typeName);
+                if (!t) {
+                  core.warning(`Issue type "${typeName}" not found in repo; leaving type unset.`);
+                } else {
+                  await github.graphql(`
+                    mutation($id:ID!, $typeId:ID!) {
+                      updateIssue(input:{ id:$id, issueTypeId:$typeId }) { issue { id } }
+                    }`, { id: created.data.node_id, typeId: t.id });
+                  core.info(`Set issue type = ${typeName}`);
+                }
+              } catch (err) {
+                core.warning(`Could not set issue type "${typeName}": ${err.message}`);
+              }
+            }
+
+            // Set the Priority single-select field (best-effort; not linkage-critical).
+            if (priorityName) {
+              try {
+                const pq = await github.graphql(`
+                  query($owner:String!, $repo:String!) {
+                    repository(owner:$owner, name:$repo) {
+                      issueFields(first:50) {
+                        nodes { __typename ... on IssueFieldSingleSelect { id name options { id name } } }
+                      }
+                    }
+                  }`, { owner, repo });
+                const field = (pq.repository.issueFields.nodes || []).find(f => f.name === 'Priority');
+                const opt = field && (field.options || []).find(o => o.name === priorityName);
+                if (!field) {
+                  core.warning(`"Priority" field not found; leaving priority unset.`);
+                } else if (!opt) {
+                  core.warning(`Priority option "${priorityName}" not found; leaving priority unset.`);
+                } else {
+                  await github.graphql(`
+                    mutation($issueId:ID!, $fieldId:ID!, $optionId:ID!) {
+                      updateIssueFieldValue(input:{
+                        issueId:$issueId,
+                        issueField:{ fieldId:$fieldId, singleSelectOptionId:$optionId }
+                      }) { issue { id } }
+                    }`, { issueId: created.data.node_id, fieldId: field.id, optionId: opt.id });
+                  core.info(`Set Priority = ${priorityName}`);
+                }
+              } catch (err) {
+                core.warning(`Could not set Priority "${priorityName}": ${err.message}`);
+              }
+            }
 
             // 5. Set the field, THEN strip the link from the body --------------------
             if (jiraUrl && supportFieldId) {
@@ -190,7 +270,9 @@ jobs:
               .addList([
                 `Issue: #${created.data.number}`,
                 `URL: ${created.data.html_url}`,
-                `Labels: ${labels.join(', ') || '(none)'}`,
+                `Type: ${typeName || '(none)'}`,
+                `Priority: ${priorityName || '(none)'}`,
+                `Labels: ${plainLabels.join(', ') || '(none)'}`,
                 `${SUPPORT_FIELD_NAME}: ${jiraUrl || '(no Jira link found in body)'}`,
               ])
               .write();
