@@ -141,8 +141,8 @@ jobs:
               for (const line of text.split('\n')) {
                 if (!urlTest.test(line)) { out.push(line); continue; }
                 let l = line.replace(mdLinkRe, '').replace(urlRe, '');
-                // Strip a leading label such as "Jira:", "Jira ticket:", etc.
-                l = l.replace(/^\s*(?:[-*>]\s*)?(?:\*\*|__)?\s*jira[^:]*:\s*(?:\*\*|__)?\s*/i, '');
+                // Strip a leading backlink label such as "Ref:", "Jira:", "Ticket:".
+                l = l.replace(/^\s*(?:[-*>]\s*)?(?:\*\*|__)?\s*(?:jira|ref|ticket)[^:]*:\s*(?:\*\*|__)?\s*/i, '');
                 // Drop leftover empty link remnants / emphasis, then trim.
                 l = l.replace(/\[\s*\]\(\s*\)/g, '').replace(/`+/g, '').trim();
                 // If nothing meaningful remains (empty or only a separator), drop it.
@@ -159,14 +159,19 @@ jobs:
               return cleaned;
             };
 
-            // 4. Create the issue with the ORIGINAL body (Jira link left intact) -----
-            // The link stays in the body until the field is confirmed set, so that a
-            // failure while setting the field can never leave the issue with no
-            // reference back to its Jira ticket.
+            // 4. Create the issue with the Jira link ALREADY STRIPPED from the body ---
+            // The link must be absent at creation time: the Atlassian "GitHub for Jira"
+            // app scans new issue bodies for Jira keys and, when it finds one, re-injects
+            // a smart-link backlink into the body (which we then cannot remove — it wins
+            // the race). Creating with a clean body means the app never associates the
+            // issue, so the key lives only in the "Jira Support Key" field. Linkage
+            // safety on a field-set failure is handled in step 5 (the link is restored
+            // to the body).
+            const cleanedBody = jiraUrl ? stripJiraLink(rawBody, jiraUrl) : rawBody;
             const created = await github.rest.issues.create({
               owner, repo,
               title,
-              body: rawBody,
+              body: cleanedBody,
               labels: plainLabels.length ? plainLabels : undefined,
             });
             core.info(`Created issue #${created.data.number}: ${created.data.html_url}`);
@@ -227,10 +232,13 @@ jobs:
               }
             }
 
-            // 5. Set the field, THEN strip the link from the body --------------------
+            // 5. Store the Jira link in the "Jira Support Key" field -----------------
+            // The body was created clean (step 4), so on success the key lives only in
+            // the field. On FAILURE, restore the original body (with the link) as a
+            // linkage fallback so the issue is never left with no reference to its Jira
+            // ticket, then fail loudly. (Restoring it means the Atlassian app will then
+            // maintain the body backlink.)
             if (jiraUrl && supportFieldId) {
-              // Set the field first. If it fails, keep the body link (the records stay
-              // linked) and fail the run loudly.
               try {
                 await github.graphql(`
                   mutation($issueId:ID!, $fieldId:ID!, $value:String!) {
@@ -241,26 +249,27 @@ jobs:
                   }`, { issueId: created.data.node_id, fieldId: supportFieldId, value: jiraUrl });
                 core.info(`Set "${SUPPORT_FIELD_NAME}" = ${jiraUrl}`);
               } catch (err) {
+                // The link is already in the created body if stripping removed nothing;
+                // otherwise put it back by restoring the original body.
+                const linkInBody = cleanedBody === rawBody;
+                let restored = false;
+                if (!linkInBody) {
+                  try {
+                    await github.rest.issues.update({
+                      owner, repo, issue_number: created.data.number, body: rawBody,
+                    });
+                    restored = true;
+                  } catch (e2) {
+                    core.error(`Also failed to restore the Jira link to the body: ${e2.message}`);
+                  }
+                }
                 core.setFailed(
                   `Created issue #${created.data.number}, but failed to set ` +
-                  `"${SUPPORT_FIELD_NAME}": ${err.message}. The Jira link was left in the ` +
-                  `issue body, so the records remain linked — fix the field manually.`);
+                  `"${SUPPORT_FIELD_NAME}": ${err.message}. ` +
+                  ((linkInBody || restored)
+                    ? `The Jira link is in the body, so the records remain linked — set the field manually.`
+                    : `WARNING: the Jira link is in neither the body nor the field — link this issue to ${jiraUrl} manually.`));
                 return;
-              }
-
-              // Field is set — now it is safe to remove the link from the body.
-              const cleanedBody = stripJiraLink(rawBody, jiraUrl);
-              if (cleanedBody !== rawBody) {
-                try {
-                  await github.rest.issues.update({
-                    owner, repo, issue_number: created.data.number, body: cleanedBody,
-                  });
-                  core.info('Removed Jira link from body (now stored in the field).');
-                } catch (err) {
-                  core.warning(
-                    `Field set, but could not strip the Jira link from the body: ` +
-                    `${err.message}. The link remains in the body (harmless, just redundant).`);
-                }
               }
             }
 
