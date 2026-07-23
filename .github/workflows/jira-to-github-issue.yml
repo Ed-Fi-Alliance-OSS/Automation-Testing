@@ -200,6 +200,31 @@ jobs:
               after = conn.pageInfo.hasNextPage ? conn.pageInfo.endCursor : null;
             } while (after);
 
+            // Jira issue type -> GitHub issue type. Default Feature (Task unused).
+            const TYPE_MAP = { bug: 'Bug', story: 'Feature' };
+            const DEFAULT_TYPE = 'Feature';
+            const typeQuery = await github.graphql(`
+              query($owner:String!, $repo:String!) {
+                repository(owner:$owner, name:$repo) {
+                  issueTypes(first:20) { nodes { id name } }
+                }
+              }`, { owner, repo });
+            const typeIdByName = new Map(
+              typeQuery.repository.issueTypes.nodes.map(n => [n.name.toLowerCase(), n.id])
+            );
+            const setIssueType = async (issueNodeId, jiraType) => {
+              const ghType = TYPE_MAP[(jiraType || '').toLowerCase()] || DEFAULT_TYPE;
+              const typeId = typeIdByName.get(ghType.toLowerCase());
+              if (!typeId) {
+                core.warning(`GitHub issue type "${ghType}" not found; leaving issue untyped.`);
+                return;
+              }
+              await github.graphql(`
+                mutation($id:ID!, $typeId:ID!) {
+                  updateIssue(input:{ id:$id, issueTypeId:$typeId }) { issue { id } }
+                }`, { id: issueNodeId, typeId });
+            };
+
             const stats = { created: 0, recovered: 0, skipped: 0, labelRemoved: 0, errors: 0 };
             for (const t of tickets) {
               try {
@@ -241,6 +266,9 @@ jobs:
                   owner, repo, title: t.summary, body,
                 });
                 core.info(`${t.key}: created issue #${created.data.number}`);
+
+                await setIssueType(created.data.node_id, t.issuetype);
+                core.info(`${t.key}: issue type set from Jira "${t.issuetype}"`);
 
                 // Set the field BEFORE the remote link so it can anchor recovery.
                 await setSupportKey(created.data.node_id, jiraUrl);
