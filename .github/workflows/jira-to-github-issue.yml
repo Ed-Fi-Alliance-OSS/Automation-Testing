@@ -38,12 +38,14 @@ jobs:
             --header "Accept: application/json" \
             --header "Content-Type: application/json" \
             --data "$(jq -n --arg jql "$JQL" \
-              '{ jql: $jql, fields: ["summary","description"], maxResults: 100 }')")
+              '{ jql: $jql, fields: ["summary","description","issuetype","labels"], maxResults: 100 }')")
 
           echo "$RESPONSE" | jq '[.issues[] | {
             key: .key,
             summary: .fields.summary,
-            description: .fields.description
+            description: .fields.description,
+            issuetype: .fields.issuetype.name,
+            labels: (.fields.labels // [])
           }]' > tickets.json
 
           COUNT=$(jq 'length' tickets.json)
