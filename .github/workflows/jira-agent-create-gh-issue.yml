@@ -38,6 +38,10 @@ jobs:
           INPUT_TITLE: ${{ inputs.title }}
           INPUT_BODY: ${{ inputs.body }}
           INPUT_LABELS: ${{ inputs.labels }}
+          # Jira credentials for writing the remote (web) link back onto the ticket.
+          JIRA_BASE_URL: ${{ vars.JIRA_BASE_URL }}
+          JIRA_USER_EMAIL: ${{ secrets.CREATE_JIRA_TICKET_USER_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.CREATE_JIRA_TICKET_PAT }}
         with:
           script: |
             const { owner, repo } = context.repo;
@@ -140,13 +144,20 @@ jobs:
               const out = [];
               for (const line of text.split('\n')) {
                 if (!urlTest.test(line)) { out.push(line); continue; }
-                let l = line.replace(mdLinkRe, '').replace(urlRe, '');
-                // Strip a leading backlink label such as "Ref:", "Jira:", "Ticket:".
-                l = l.replace(/^\s*(?:[-*>]\s*)?(?:\*\*|__)?\s*(?:jira|ref|ticket)[^:]*:\s*(?:\*\*|__)?\s*/i, '');
-                // Drop leftover empty link remnants / emphasis, then trim.
-                l = l.replace(/\[\s*\]\(\s*\)/g, '').replace(/`+/g, '').trim();
-                // If nothing meaningful remains (empty or only a separator), drop it.
-                if (l === '' || /^[-*_\s|>]+$/.test(l)) continue;
+                // Remove the markdown link and any bare URL from the line.
+                const l = line.replace(mdLinkRe, '').replace(urlRe, '').trim();
+                // Decide whether anything MEANINGFUL remains, ignoring footer
+                // scaffolding: empty-link remnants, emphasis/quote markers, a leading
+                // "Label:" prefix (any wording, e.g. "Ref:", "Originating Jira Ticket:"),
+                // and separators / whitespace / table pipes.
+                const skeleton = l
+                  .replace(/\[\s*\]\(\s*\)/g, '')
+                  .replace(/[*_`>]+/g, ' ')
+                  .replace(/^[\s-]*[A-Za-z][\w .\/-]*:/, '')
+                  .replace(/[-\s|]+/g, '')
+                  .trim();
+                // Pure footer scaffolding (label + emphasis, nothing else) → drop line.
+                if (skeleton === '') continue;
                 out.push(l);
               }
               let cleaned = out.join('\n').replace(/\s+$/, '');
@@ -273,7 +284,48 @@ jobs:
               }
             }
 
-            // 6. Job summary ---------------------------------------------------------
+            // 6. Write a Jira remote (web) link back to the GitHub issue -------------
+            // Provides the Jira → GitHub direction (the field is GitHub → Jira). This is
+            // how the created issue's URL gets back to Jira, since workflow_dispatch
+            // returns nothing to the caller. Best-effort: a failure warns but does not
+            // fail the run (the issue and field are already correct).
+            if (jiraUrl) {
+              const jiraKey = (jiraUrl.match(/\/browse\/([A-Z][A-Z0-9]+-\d+)/i) || [])[1];
+              const base = process.env.JIRA_BASE_URL;
+              const email = process.env.JIRA_USER_EMAIL;
+              const token = process.env.JIRA_API_TOKEN;
+              if (!jiraKey || !base || !email || !token) {
+                core.warning('Jira key or credentials not available; skipping Jira remote link.');
+              } else {
+                try {
+                  const auth = 'Basic ' + Buffer.from(`${email}:${token}`).toString('base64');
+                  const res = await fetch(`${base}/rest/api/3/issue/${jiraKey}/remotelink`, {
+                    method: 'POST',
+                    headers: {
+                      Authorization: auth,
+                      Accept: 'application/json',
+                      'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                      object: {
+                        url: created.data.html_url,
+                        title: `GitHub Issue #${created.data.number}: ${title}`,
+                        icon: { url16x16: 'https://github.com/favicon.ico', title: 'GitHub' },
+                      },
+                    }),
+                  });
+                  if (!res.ok) {
+                    core.warning(`Failed to add Jira remote link to ${jiraKey}: HTTP ${res.status} ${await res.text()}`);
+                  } else {
+                    core.info(`Added Jira remote link on ${jiraKey} → ${created.data.html_url}`);
+                  }
+                } catch (err) {
+                  core.warning(`Could not add Jira remote link to ${jiraKey}: ${err.message}`);
+                }
+              }
+            }
+
+            // 7. Job summary ---------------------------------------------------------
             await core.summary
               .addHeading('Jira → GitHub issue created', 2)
               .addList([
