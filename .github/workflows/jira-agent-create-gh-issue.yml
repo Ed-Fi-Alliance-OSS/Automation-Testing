@@ -209,32 +209,61 @@ jobs:
             if (issueTypeId) core.info(`Set issue type = ${typeName} (atomic)`);
             if (priorityOptionId) core.info(`Set Priority = ${priorityName} (atomic)`);
 
-            // 6. Apply plain labels (best-effort; not linkage-critical). Create any that
-            //    do not yet exist so the apply never fails on an unknown label.
+            // 6. Apply plain labels (best-effort; not linkage-critical). Only labels that
+            //    ALREADY exist in the repo are applied — this workflow never creates one,
+            //    so a typo or one-off value from the agent cannot pollute the repo's label
+            //    set. Unknown labels are skipped silently. The label set is fetched once
+            //    and matched case-insensitively, so casing drift ("Bug" vs "bug") still
+            //    resolves, and the repo's own spelling is what gets applied.
+            //    The filter runs BEFORE addLabels because that endpoint creates missing
+            //    labels rather than rejecting them.
+            let labelSummary = '(none)';
             if (plainLabels.length) {
-              for (const name of plainLabels) {
-                try {
-                  await github.rest.issues.getLabel({ owner, repo, name });
-                } catch (e) {
-                  if (e.status === 404) {
-                    try {
-                      await github.rest.issues.createLabel({ owner, repo, name });
-                      core.info(`Created label "${name}"`);
-                    } catch (ce) {
-                      core.warning(`Could not create label "${name}": ${ce.message}`);
-                    }
-                  } else {
-                    core.warning(`Could not check label "${name}": ${e.message}`);
+              let existing = null;
+              try {
+                const all = await github.paginate(github.rest.issues.listLabelsForRepo, {
+                  owner, repo, per_page: 100,
+                });
+                existing = new Map(all.map(l => [l.name.toLowerCase(), l.name]));
+              } catch (err) {
+                // Without the repo's label list the input cannot be safely filtered.
+                // Skip labelling rather than risk creating a label.
+                core.warning(
+                  `Could not list repository labels (${err.message}); skipping labels ` +
+                  `entirely rather than risk creating one.`);
+              }
+
+              if (!existing) {
+                labelSummary = '(none — label list unavailable)';
+              } else {
+                const applied = [];
+                const skipped = [];
+                const seen = new Set();
+                for (const name of plainLabels) {
+                  const canonical = existing.get(name.toLowerCase());
+                  if (!canonical) { skipped.push(name); continue; }
+                  if (seen.has(canonical)) continue;   // dedupe "bug,Bug" → one entry
+                  seen.add(canonical);
+                  applied.push(canonical);
+                }
+                if (skipped.length) {
+                  core.info(
+                    `Skipping labels not present in ${owner}/${repo}: ${skipped.join(', ')}`);
+                }
+                if (applied.length) {
+                  try {
+                    await github.rest.issues.addLabels({
+                      owner, repo, issue_number: issue.number, labels: applied,
+                    });
+                    core.info(`Applied labels: ${applied.join(', ')}`);
+                  } catch (err) {
+                    core.warning(`Could not apply labels: ${err.message}`);
                   }
                 }
-              }
-              try {
-                await github.rest.issues.addLabels({
-                  owner, repo, issue_number: issue.number, labels: plainLabels,
-                });
-                core.info(`Applied labels: ${plainLabels.join(', ')}`);
-              } catch (err) {
-                core.warning(`Could not apply labels: ${err.message}`);
+                labelSummary = applied.length ? applied.join(', ') : '(none)';
+                if (skipped.length) {
+                  labelSummary += ` (${skipped.length} skipped: ${skipped.join(', ')})`;
+                }
               }
             }
 
@@ -287,7 +316,7 @@ jobs:
                 `URL: ${issue.url}`,
                 `Type: ${issueTypeId ? typeName : '(none)'}`,
                 `Priority: ${priorityOptionId ? priorityName : '(none)'}`,
-                `Labels: ${plainLabels.join(', ') || '(none)'}`,
+                `Labels: ${labelSummary}`,
                 `${SUPPORT_FIELD_NAME}: ${jiraUrl || '(no Jira link found in body)'}`,
               ])
               .write();
