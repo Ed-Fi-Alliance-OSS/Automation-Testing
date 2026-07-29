@@ -47,6 +47,12 @@ permissions:
 jobs:
   create-issue:
     runs-on: ubuntu-latest
+    # Fail fast instead of occupying a runner for the 6-hour default. The remote-link step
+    # calls fetch(), and Node's fetch has NO default timeout, so an unresponsive Jira would
+    # otherwise hang here. Because cancel-in-progress is false below, a hung run also holds
+    # its concurrency group, stalling every later dispatch for the same ticket.
+    # Observed runs finish in 11-21s; 10 minutes is generous headroom.
+    timeout-minutes: 10
     # Serialize dispatches for the same ticket so two near-simultaneous calls cannot both
     # pass the "already linked?" check below and each create an issue.
     concurrency:
@@ -54,7 +60,7 @@ jobs:
       cancel-in-progress: false
     steps:
       - name: Create issue (atomic) with Jira Support Key, Type, Priority, labels
-        uses: actions/github-script@v7
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           # Pass inputs through env (not string-interpolated into the script) to avoid
           # script injection from Jira-sourced content.
