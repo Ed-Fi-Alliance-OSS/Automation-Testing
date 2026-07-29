@@ -16,6 +16,9 @@ name: Create GitHub Issue from Jira agent
 # Atlassian "GitHub for Jira" app associates any issue whose body carries a Jira key and
 # injects its own backlink, which is why the linkage travels in jira_key instead of being
 # parsed back out of the body. A body that still carries the link is warned about below.
+#
+# The body is otherwise passed through as written, except that @mentions outside code are
+# defused so a Jira description cannot spray GitHub notifications from this repo.
 
 on:
   workflow_dispatch:
@@ -68,43 +71,92 @@ jobs:
           script: |
             const { owner, repo } = context.repo;
 
-            const title = (process.env.INPUT_TITLE || '').trim();
-            const issueBody = process.env.INPUT_BODY || '';
+            let title = (process.env.INPUT_TITLE || '').trim();
             const labelsInput = process.env.INPUT_LABELS || '';
 
             const SUPPORT_FIELD_NAME = 'Jira Support Key';
             const PRIORITY_FIELD_NAME = 'Priority';
+            const TITLE_MAX = 256;   // GitHub's hard cap on issue titles
 
             // 1. Validate title -------------------------------------------------------
             if (!title) {
               core.setFailed('The "title" input is empty. A GitHub issue requires a title.');
               return;
             }
+            // A Jira summary maxes out at 255 characters, so a straight pass-through fits;
+            // an agent that decorates the title (prefixes, suffixes) can still overshoot.
+            // Truncate rather than fail: a slightly clipped title beats a dispatch that
+            // creates nothing and leaves the ticket unbridged.
+            if (title.length > TITLE_MAX) {
+              core.warning(
+                `Title is ${title.length} characters; GitHub caps issue titles at ` +
+                `${TITLE_MAX}. Truncating.`);
+              title = title.slice(0, TITLE_MAX - 1) + '…';
+            }
+
+            // 1b. Neutralize @mentions in the Jira-sourced body ------------------------
+            // The body reaches GitHub verbatim, so an @user or @org/team written into a
+            // Jira description would deliver real notifications from this repo to people
+            // who never asked for them. A zero-width space after the "@" renders
+            // identically but stops GitHub from linkifying it.
+            // Code spans and fenced blocks are left ALONE: GitHub does not linkify
+            // mentions inside them anyway, and injecting an invisible character would
+            // silently break copy-pasted commands like `npm install @scope/pkg`.
+            const ZWSP = '\u200B';   // invisible, but breaks GitHub's mention parser
+            const escapeMentions = (text) =>
+              text.replace(/(^|[^\w`])@(?=[A-Za-z0-9][A-Za-z0-9-]*)/g, '$1@' + ZWSP);
+            const issueBody = (process.env.INPUT_BODY || '')
+              .split(/(```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`)/)
+              .map((segment, i) => (i % 2 === 0 ? escapeMentions(segment) : segment))
+              .join('');
 
             // 2. Parse labels: "type:*" → native issue Type, "priority:*" → Priority
             //    field, everything else stays a normal label (resolved to a label ID and
             //    set in the create mutation).
             // Unmapped type:/priority: values are dropped entirely (not kept as labels).
-            const TYPE_MAP = { feature: 'Feature', enhancement: 'Feature', bug: 'Bug' };
+            // TYPE_MAP covers every issue type this repo defines (Task, Bug, Feature).
+            const TYPE_MAP = {
+              feature: 'Feature', enhancement: 'Feature', bug: 'Bug', task: 'Task',
+            };
             const PRIORITY_MAP = { critical: 'Urgent', high: 'High', medium: 'Medium', low: 'Low' };
+            // Untyped issues are invisible to type-based filtering, so an omitted type:
+            // label falls back rather than leaving the type unset. Mirrors the sibling
+            // triage workflow, which falls back to JIRA_ISSUE_TYPE and then Story.
+            const DEFAULT_TYPE = 'Task';
 
             let typeName = null;       // native issue-type name to set (or null)
             let priorityName = null;   // Priority option name to set (or null)
             const plainLabels = [];
 
+            // First value wins on conflict, matching the sibling workflow's `| head -1`.
+            // Last-wins would make the outcome depend on label ordering the agent does not
+            // control, and would do it silently; a conflict is worth a warning either way.
             for (const raw of labelsInput.split(',').map(s => s.trim()).filter(Boolean)) {
               const lower = raw.toLowerCase();
               if (lower.startsWith('type:')) {
                 const mapped = TYPE_MAP[lower.slice(5).trim()];
-                if (mapped) typeName = mapped;
-                else core.info(`Dropping unmapped type label "${raw}"`);
+                if (!mapped) core.info(`Dropping unmapped type label "${raw}"`);
+                else if (typeName && typeName !== mapped) {
+                  core.warning(
+                    `Ignoring "${raw}": issue type already resolved to "${typeName}" by an ` +
+                    `earlier label.`);
+                } else typeName = mapped;
               } else if (lower.startsWith('priority:')) {
                 const mapped = PRIORITY_MAP[lower.slice(9).trim()];
-                if (mapped) priorityName = mapped;
-                else core.info(`Dropping unmapped priority label "${raw}"`);
+                if (!mapped) core.info(`Dropping unmapped priority label "${raw}"`);
+                else if (priorityName && priorityName !== mapped) {
+                  core.warning(
+                    `Ignoring "${raw}": priority already resolved to "${priorityName}" by an ` +
+                    `earlier label.`);
+                } else priorityName = mapped;
               } else {
                 plainLabels.push(raw);
               }
+            }
+
+            if (!typeName) {
+              typeName = DEFAULT_TYPE;
+              core.info(`No usable "type:" label supplied; defaulting to "${DEFAULT_TYPE}".`);
             }
 
             // 3. Validate the Jira key -----------------------------------------------
