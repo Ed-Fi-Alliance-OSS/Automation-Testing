@@ -18,24 +18,37 @@ jobs:
         id: external_check
         env:
           AUTHOR_ASSOCIATION: ${{ github.event.issue.author_association }}
+          AUTHOR_TYPE:        ${{ github.event.issue.user.type }}
+          AUTHOR_LOGIN:       ${{ github.event.issue.user.login }}
         run: |
-          # TEMP: org/external check disabled for testing — always proceed.
-          # Restore the block below to re-enable the external-submitter gate.
-          echo "⚠️ External check bypassed (testing). Treating author as external."
-          echo "is_external=true" >> "$GITHUB_OUTPUT"
+          # Bots are never external submitters. This is a LOOP GUARD, not a nicety:
+          # jira-agent-create-gh-issue.yml creates GitHub issues for tickets that already
+          # came FROM Jira, and sending those back would duplicate the ticket.
+          #
+          # Do NOT rely on GitHub declining to re-trigger workflows for GITHUB_TOKEN-caused
+          # events. That is implicit platform behaviour, it is the only thing preventing the
+          # loop today, and it disappears the moment any step in that chain uses a PAT.
+          #
+          # It also cannot be inferred from author_association: github-actions[bot] reports
+          # NONE, which the case block below would classify as EXTERNAL and let through.
+          if [ "$AUTHOR_TYPE" = "Bot" ]; then
+            echo "Author '$AUTHOR_LOGIN' is a bot ($AUTHOR_TYPE). Not an external submitter. Skipping."
+            echo "is_external=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
 
           # author_association comes straight from the issue payload — no PAT or API call.
           # Treat org insiders as internal; everyone else counts as external.
-          # case "$AUTHOR_ASSOCIATION" in
-          #   OWNER|MEMBER|COLLABORATOR)
-          #     echo "Author association '$AUTHOR_ASSOCIATION' is internal. Skipping."
-          #     echo "is_external=false" >> "$GITHUB_OUTPUT"
-          #     ;;
-          #   *)
-          #     echo "Author association '$AUTHOR_ASSOCIATION' is external. Proceeding."
-          #     echo "is_external=true" >> "$GITHUB_OUTPUT"
-          #     ;;
-          # esac
+          case "$AUTHOR_ASSOCIATION" in
+            OWNER|MEMBER|COLLABORATOR)
+              echo "Author association '$AUTHOR_ASSOCIATION' is internal. Skipping."
+              echo "is_external=false" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "Author association '$AUTHOR_ASSOCIATION' is external. Proceeding."
+              echo "is_external=true" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
 
       - name: Resolve Jira issue type from issue labels
         if: steps.external_check.outputs.is_external == 'true'
@@ -61,7 +74,7 @@ jobs:
           echo "issue_type=$RESOLVED" >> "$GITHUB_OUTPUT"
           echo "✅ Resolved issue type: $RESOLVED (matched label type: ${TYPE:-none})"
 
-      - name: Check for existing Jira ticket for this project
+      - name: Check whether this issue is already bridged to Jira
         if: steps.external_check.outputs.is_external == 'true'
         id: check_existing
         uses: actions/github-script@v7
@@ -130,13 +143,25 @@ jobs:
               })
               .filter(Boolean);
 
-            const alreadyExists = existingProjects.includes(targetProject);
+            // PRESENCE-based, deliberately NOT project-scoped. "Jira Support Key" holds
+            // support-project tickets only — other projects use the separate "Jira Key"
+            // field — so ANY value here means this issue is already bridged to Jira and
+            // must not produce a second ticket.
+            //
+            // Comparing against JIRA_SUPPORT_PROJECT_KEY instead (the previous behaviour)
+            // read a key from any OTHER project as "no ticket yet", including one written
+            // by jira-agent-create-gh-issue.yml, and would also start duplicating against
+            // every pre-existing issue if the support project were ever renamed.
+            //
+            // Uses the raw value rather than the parsed prefixes on purpose: a value that
+            // fails to parse still means SOMETHING bridged this issue, so it should skip.
+            const alreadyExists = existingValue.trim() !== '';
             core.setOutput('already_exists', String(alreadyExists));
 
             if (alreadyExists) {
-              console.log(`Project ${targetProject} already has a ticket for this issue (field: "${existingValue}") — skipping.`);
+              console.log(`Issue is already bridged to Jira (field: "${existingValue}"; parsed projects: ${existingProjects.join(', ') || 'none parsed'}) — skipping.`);
             } else {
-              console.log(`No ${targetProject} ticket yet (existing projects: ${existingProjects.join(', ') || 'none'}) — will create.`);
+              console.log(`No "Jira Support Key" value on this issue — will create in ${targetProject}.`);
             }
 
       - name: Create Jira Ticket
