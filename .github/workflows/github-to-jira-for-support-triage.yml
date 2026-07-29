@@ -22,39 +22,97 @@ jobs:
     steps:
       - name: Check if issue author is external to the organization
         id: external_check
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           AUTHOR_ASSOCIATION: ${{ github.event.issue.author_association }}
           AUTHOR_TYPE:        ${{ github.event.issue.user.type }}
           AUTHOR_LOGIN:       ${{ github.event.issue.user.login }}
-        run: |
-          # Bots are never external submitters. This is a LOOP GUARD, not a nicety:
-          # jira-agent-create-gh-issue.yml creates GitHub issues for tickets that already
-          # came FROM Jira, and sending those back would duplicate the ticket.
-          #
-          # Do NOT rely on GitHub declining to re-trigger workflows for GITHUB_TOKEN-caused
-          # events. That is implicit platform behaviour, it is the only thing preventing the
-          # loop today, and it disappears the moment any step in that chain uses a PAT.
-          #
-          # It also cannot be inferred from author_association: github-actions[bot] reports
-          # NONE, which the case block below would classify as EXTERNAL and let through.
-          if [ "$AUTHOR_TYPE" = "Bot" ]; then
-            echo "Author '$AUTHOR_LOGIN' is a bot ($AUTHOR_TYPE). Not an external submitter. Skipping."
-            echo "is_external=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+          ORG_READ_TOKEN:     ${{ secrets.GH_ORG_READ_PAT }}
+        with:
+          script: |
+            const login       = process.env.AUTHOR_LOGIN || '';
+            const association = process.env.AUTHOR_ASSOCIATION || '';
+            const org         = context.repo.owner;
 
-          # author_association comes straight from the issue payload — no PAT or API call.
-          # Treat org insiders as internal; everyone else counts as external.
-          case "$AUTHOR_ASSOCIATION" in
-            OWNER|MEMBER|COLLABORATOR)
-              echo "Author association '$AUTHOR_ASSOCIATION' is internal. Skipping."
-              echo "is_external=false" >> "$GITHUB_OUTPUT"
-              ;;
-            *)
-              echo "Author association '$AUTHOR_ASSOCIATION' is external. Proceeding."
-              echo "is_external=true" >> "$GITHUB_OUTPUT"
-              ;;
-          esac
+            // Bots are never external submitters. This is a LOOP GUARD, not a nicety:
+            // jira-agent-create-gh-issue.yml creates GitHub issues for tickets that already
+            // came FROM Jira, and sending those back would duplicate the ticket.
+            //
+            // Do NOT rely on GitHub declining to re-trigger workflows for GITHUB_TOKEN-caused
+            // events. That is documented platform behaviour, it is the only thing preventing
+            // the loop today, and it stops applying the moment any step in that chain uses a
+            // PAT or GitHub App token.
+            //
+            // It also cannot be inferred from author_association: github-actions[bot] reports
+            // NONE, which would otherwise be classified as EXTERNAL and let through.
+            if (process.env.AUTHOR_TYPE === 'Bot') {
+              core.info(`Author "${login}" is a bot. Not an external submitter. Skipping.`);
+              core.setOutput('is_external', 'false');
+              return;
+            }
+
+            // author_association is a REPO-relationship field and is NOT a reliable proxy for
+            // org membership. It only reports MEMBER when the member's org membership is
+            // PUBLIC; for a member whose membership is private, GitHub falls back to their
+            // next-strongest relationship with the repo. An org member who has ever committed
+            // here therefore reports CONTRIBUTOR, and one who has not reports NONE — both
+            // indistinguishable from a genuine outsider. That is exactly how issue #57 reached
+            // Jira as EDFI-2871 (run 30474672197): a private org member reported CONTRIBUTOR.
+            //
+            // Widening the internal list to include CONTRIBUTOR would be worse than the bug:
+            // a real external contributor whose PR was merged once also reports CONTRIBUTOR,
+            // so genuine support requests would be dropped silently.
+            //
+            // The positive signals ARE trustworthy, so honour them without an API call and
+            // only pay for the org lookup when the association is inconclusive.
+            if (['OWNER', 'MEMBER', 'COLLABORATOR'].includes(association)) {
+              core.info(`Author association "${association}" is internal. Skipping.`);
+              core.setOutput('is_external', 'false');
+              return;
+            }
+
+            // Inconclusive association — ask the org directly. This needs read:org, which
+            // GITHUB_TOKEN does not carry, hence GH_ORG_READ_PAT (the same secret the
+            // dev-backlog workflow uses for its team lookup).
+            if (!process.env.ORG_READ_TOKEN) {
+              core.setFailed(
+                `Author association is "${association}", which cannot distinguish a private ` +
+                `org member from an outsider, and GH_ORG_READ_PAT is not set so membership ` +
+                `cannot be checked. Refusing to guess.`);
+              return;
+            }
+
+            const orgClient = getOctokit(process.env.ORG_READ_TOKEN);
+            let isMember;
+            try {
+              await orgClient.rest.orgs.checkMembershipForUser({ org, username: login });
+              isMember = true;              // 204 = member
+            } catch (err) {
+              if (err.status === 404) {
+                isMember = false;           // 404 = definitively not a member
+              } else {
+                // 302 means the PAT's owner is not an org member, so the answer is unknowable.
+                // Anything else is an outage or a bad token. Either way this is a REAL failure:
+                // guessing would silently create a Jira ticket for an insider or silently drop
+                // an external report.
+                core.setFailed(
+                  `Could not determine whether "${login}" belongs to ${org} ` +
+                  `(HTTP ${err.status}: ${err.message}). Refusing to guess.`);
+                return;
+              }
+            }
+
+            if (isMember) {
+              core.info(
+                `Author "${login}" reports association "${association}" but IS a member of ` +
+                `${org} (private membership). Treating as internal. Skipping.`);
+              core.setOutput('is_external', 'false');
+            } else {
+              core.info(
+                `Author "${login}" is not a member of ${org} (association "${association}"). ` +
+                `Treating as external. Proceeding.`);
+              core.setOutput('is_external', 'true');
+            }
 
       - name: Resolve Jira issue type from issue labels
         if: steps.external_check.outputs.is_external == 'true'
