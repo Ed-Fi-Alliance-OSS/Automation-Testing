@@ -1,4 +1,4 @@
-name: Create GitHub Issue from Jira agent
+name: Jira ticket → GitHub issue (product backlog)
 
 # Triggered on-demand by the Jira AI bridge agent (see Jira instructions.md) via a
 # workflow_dispatch call. The agent composes the title/body/labels and states which ticket
@@ -45,7 +45,7 @@ permissions:
   issues: write
 
 jobs:
-  create-issue:
+  jira-to-github-issue:
     runs-on: ubuntu-latest
     # Fail fast instead of occupying a runner for the 6-hour default. The remote-link step
     # calls fetch(), and Node's fetch has NO default timeout, so an unresponsive Jira would

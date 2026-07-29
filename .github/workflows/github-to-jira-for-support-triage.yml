@@ -1,4 +1,4 @@
-name: Create Jira Ticket from External Issue
+name: External issue → Jira support triage
 
 on:
   issues:
@@ -8,7 +8,7 @@ permissions:
   issues: write
 
 jobs:
-  create-jira-ticket:
+  github-to-jira-support-triage:
     runs-on: ubuntu-latest
     # Fail fast instead of occupying a runner for the 6-hour default: this job curls Jira,
     # and a hung request would otherwise sit here. Because cancel-in-progress is false
@@ -334,3 +334,44 @@ jobs:
             `, { issueId: issueNodeId, fieldId, value: newValue });
 
             console.log(`✅ "Jira Support Key" field set to: ${newValue}`);
+
+      # Runs even when earlier steps skipped or failed, because a skip is now the NORMAL
+      # outcome here (internal author, or already bridged) and a green run with no
+      # explanation is the thing that makes these workflows hard to trust. always() also
+      # means a failed run still says how far it got.
+      - name: Job summary
+        if: always()
+        env:
+          IS_EXTERNAL:   ${{ steps.external_check.outputs.is_external }}
+          ALREADY:       ${{ steps.check_existing.outputs.already_exists }}
+          EXISTING:      ${{ steps.check_existing.outputs.existing_value }}
+          ISSUE_TYPE:    ${{ steps.jira_meta.outputs.issue_type }}
+          JIRA_KEY:      ${{ steps.create_ticket.outputs.jira_key }}
+          JIRA_BASE_URL: ${{ vars.JIRA_BASE_URL }}
+          AUTHOR_LOGIN:  ${{ github.event.issue.user.login }}
+          ASSOCIATION:   ${{ github.event.issue.author_association }}
+          ISSUE_NUM:     ${{ github.event.issue.number }}
+          ISSUE_URL:     ${{ github.event.issue.html_url }}
+        run: |
+          {
+            echo "## External issue → Jira support triage"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| GitHub issue | [#${ISSUE_NUM}](${ISSUE_URL}) |"
+            echo "| Author | \`${AUTHOR_LOGIN}\` (association \`${ASSOCIATION:-unknown}\`) |"
+            if [ -z "$IS_EXTERNAL" ]; then
+              echo "| Outcome | **failed** — could not determine whether the author is external; see step log |"
+            elif [ "$IS_EXTERNAL" != "true" ]; then
+              echo "| Outcome | **skipped** — author is not an external submitter |"
+            elif [ "$ALREADY" = "true" ]; then
+              echo "| Existing linkage | \`${EXISTING}\` |"
+              echo "| Outcome | **skipped** — issue is already bridged to Jira |"
+            elif [ -n "$JIRA_KEY" ]; then
+              echo "| Jira ticket | [${JIRA_KEY}](${JIRA_BASE_URL}/browse/${JIRA_KEY}) |"
+              echo "| Issue type | ${ISSUE_TYPE:-(none)} |"
+              echo "| Outcome | **created** |"
+            else
+              echo "| Outcome | **no ticket created** — author was external and not already bridged, so a later step failed; see step log |"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

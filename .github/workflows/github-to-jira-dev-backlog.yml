@@ -1,4 +1,4 @@
-name: Create Jira Ticket from GitHub Label
+name: Labelled issue → Jira dev backlog
 
 on:
   issues:
@@ -7,7 +7,7 @@ on:
 permissions:
   issues: write
 jobs:
-  create-jira-ticket:
+  github-to-jira-dev-backlog:
     # Run on every label event — the first step determines if this label is a configured trigger
     if: vars.GH_JIRA_AUTOMATION_CONFIG != ''
     runs-on: ubuntu-latest
@@ -391,4 +391,60 @@ jobs:
             `, { issueId: issueNodeId, fieldId, value: newValue });
 
             console.log(`✅ "Jira Key" field set to: ${newValue}`);
+
+      # Runs even when earlier steps skipped or failed, because a skip is now the NORMAL
+      # outcome here (label is not a trigger, bot-applied label, unauthorized actor, or the
+      # project already has a ticket) and a green run with no explanation is the thing that
+      # makes these workflows hard to trust. always() also means a failed run still says how
+      # far it got.
+      - name: Job summary
+        if: always()
+        env:
+          MATCHED:       ${{ steps.trigger_check.outputs.matched }}
+          PROJECT_LABEL: ${{ steps.trigger_check.outputs.project_label }}
+          AUTHORIZED:    ${{ steps.actor_check.outputs.authorized }}
+          PROJECT:       ${{ steps.jira_meta.outputs.project }}
+          ISSUE_TYPE:    ${{ steps.jira_meta.outputs.issue_type }}
+          XFER_LABELS:   ${{ steps.jira_meta.outputs.transfer_labels }}
+          ALREADY:       ${{ steps.check_existing.outputs.already_exists }}
+          EXISTING:      ${{ steps.check_existing.outputs.existing_value }}
+          JIRA_KEY:      ${{ steps.create_ticket.outputs.jira_key }}
+          JIRA_BASE_URL: ${{ vars.JIRA_BASE_URL }}
+          ADDED_LABEL:   ${{ github.event.label.name }}
+          SENDER_LOGIN:  ${{ github.event.sender.login }}
+          SENDER_TYPE:   ${{ github.event.sender.type }}
+          ISSUE_NUM:     ${{ github.event.issue.number }}
+          ISSUE_URL:     ${{ github.event.issue.html_url }}
+        run: |
+          {
+            echo "## Labelled issue → Jira dev backlog"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| GitHub issue | [#${ISSUE_NUM}](${ISSUE_URL}) |"
+            echo "| Label added | \`${ADDED_LABEL}\` by \`${SENDER_LOGIN}\` (${SENDER_TYPE}) |"
+            if [ "$MATCHED" != "true" ]; then
+              if [ "$SENDER_TYPE" = "Bot" ]; then
+                echo "| Outcome | **skipped** — label was applied by automation, not a person |"
+              else
+                echo "| Outcome | **skipped** — \`${ADDED_LABEL}\` is not a configured project trigger |"
+              fi
+            elif [ "$AUTHORIZED" != "true" ]; then
+              echo "| Target project | \`${PROJECT_LABEL}\` |"
+              echo "| Outcome | **skipped** — \`${SENDER_LOGIN}\` is not in an allowed team |"
+            elif [ "$ALREADY" = "true" ]; then
+              echo "| Target project | \`${PROJECT}\` |"
+              echo "| Existing linkage | \`${EXISTING}\` |"
+              echo "| Outcome | **skipped** — \`${PROJECT}\` already has a ticket for this issue |"
+            elif [ -n "$JIRA_KEY" ]; then
+              echo "| Jira ticket | [${JIRA_KEY}](${JIRA_BASE_URL}/browse/${JIRA_KEY}) |"
+              echo "| Target project | \`${PROJECT}\` |"
+              echo "| Issue type | ${ISSUE_TYPE:-(none)} |"
+              echo "| Labels transferred | \`${XFER_LABELS:-[]}\` |"
+              echo "| Existing linkage before | \`${EXISTING:-(none)}\` |"
+              echo "| Outcome | **created** |"
+            else
+              echo "| Outcome | **no ticket created** — the trigger matched and the actor was authorized, so a later step failed; see step log |"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
