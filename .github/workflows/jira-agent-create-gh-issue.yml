@@ -87,10 +87,13 @@ jobs:
           # workflow-level env above.
           JIRA_USER_EMAIL: ${{ secrets.CREATE_JIRA_TICKET_USER_EMAIL }}
           JIRA_API_TOKEN: ${{ secrets.CREATE_JIRA_TICKET_PAT }}
+          # Org-level Projects write, used ONLY for the roadmap board add (see
+          # addToRoadmapBoard). GITHUB_TOKEN cannot write an organization project.
+          PROJECT_WRITE_TOKEN: ${{ secrets.GH_PROJECT_WRITE }}
         with:
           # Never write a ${{ }} expression anywhere inside this script, comments included.
           # One expression makes GitHub evaluate the whole script as an expression, which is
-          # capped at 21,000 characters (the script is close to that) and splices the value
+          # capped at 21,000 characters (the script is already past that) and splices the value
           # into the code unescaped. Pass values through env above instead.
           script: |
             const { owner, repo } = context.repo;
@@ -122,18 +125,24 @@ jobs:
             // the same contract the Jira remote link in step 9 follows. Returns a status
             // string for the job summary.
             //
-            // This deliberately uses the ambient `github` client (GITHUB_TOKEN) rather than a
-            // PAT. Whether GITHUB_TOKEN can write an ORGANIZATION-level ProjectV2 is the open
-            // question this change exists to answer: if it can, no new secret is ever needed;
-            // if it cannot, the failure arrives here as a warning carrying the exact status
-            // code, which is the evidence needed to justify provisioning one.
+            // This call alone runs on a SECOND client authenticated as GH_PROJECT_WRITE:
+            // GITHUB_TOKEN was tried first and refused ("Resource not accessible by
+            // integration", AI-220), because it can only be granted repo-scoped permissions
+            // and the board is organization-owned. Everything else, the create included,
+            // stays on GITHUB_TOKEN - see step 8b for why that matters. getOctokit is the
+            // supported v9 way to build the client (precedent: github-to-jira-dev-backlog.yml).
             const addToRoadmapBoard = async (issueNodeId) => {
               if (!ROADMAP_PROJECT_NODE_ID) {
                 core.info('No roadmap board configured; skipping board membership.');
                 return '(skipped - no board configured)';
               }
+              if (!process.env.PROJECT_WRITE_TOKEN) {
+                core.warning('GH_PROJECT_WRITE secret is not set; skipping board membership.');
+                return '(skipped - GH_PROJECT_WRITE not set)';
+              }
               try {
-                const res = await github.graphql(`
+                const projectClient = getOctokit(process.env.PROJECT_WRITE_TOKEN);
+                const res = await projectClient.graphql(`
                   mutation($projectId: ID!, $contentId: ID!) {
                     addProjectV2ItemById(input: { projectId: $projectId, contentId: $contentId }) {
                       item { id }
