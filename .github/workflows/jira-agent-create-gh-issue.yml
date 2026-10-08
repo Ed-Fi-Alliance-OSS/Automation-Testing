@@ -88,6 +88,10 @@ jobs:
           JIRA_USER_EMAIL: ${{ secrets.CREATE_JIRA_TICKET_USER_EMAIL }}
           JIRA_API_TOKEN: ${{ secrets.CREATE_JIRA_TICKET_PAT }}
         with:
+          # Never write a ${{ }} expression anywhere inside this script, comments included.
+          # One expression makes GitHub evaluate the whole script as an expression, which is
+          # capped at 21,000 characters (the script is close to that) and splices the value
+          # into the code unescaped. Pass values through env above instead.
           script: |
             const { owner, repo } = context.repo;
 
@@ -219,7 +223,7 @@ jobs:
             // agent knows exactly which ticket it is bridging, so there is nothing to infer.
             //
             // The raw input is validated AS GIVEN — deliberately not trimmed or upper-cased
-            // first. The job's concurrency group is keyed on ${{ inputs.jira_key }}, and
+            // first. The job's concurrency group is keyed on inputs.jira_key, and
             // Actions expressions have no case function, so the group cannot be normalized to
             // match. Normalizing here instead would mean "dms-123", "DMS-123" and " DMS-123 "
             // land in three DIFFERENT concurrency groups while all resolving to the same
