@@ -114,7 +114,7 @@ jobs:
             // an id would mean an extra query on every dispatch to look up something that
             // changes about once a year.
             // Set to '' to disable board membership entirely (see addToRoadmapBoard).
-            const ROADMAP_PROJECT_NODE_ID = 'PVT_PLACEHOLDER_NOT_YET_CAPTURED';
+            const ROADMAP_PROJECT_NODE_ID = 'PVT_kwDOA70REM4Aq1V8';
 
             // Add an issue to the Product Roadmap board. BEST-EFFORT BY CONTRACT: every
             // caller runs AFTER the issue exists and its Jira linkage field is already
